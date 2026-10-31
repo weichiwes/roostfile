@@ -36,9 +36,9 @@ A private file archive for your own computer. Add the folders you choose, then f
 
 ## Make Roo your own
 
-![Roo at rest, blinking, excited, hugging a folder and happy](previews/roo.png)
+![Roo at rest, waving, reading, doing homework, being carried and happy](previews/roo.png)
 
-Her eyes follow your pointer, she blinks, breathes and talks, and her hair swings as she moves. She is a layered illustration moved by a small rig written for this app, in the manner of Live2D. She is not a Live2D model and uses none of its software.
+She waves when she arrives. Her eyes follow your pointer, she blinks, breathes and talks, and her hair swings as she moves. Pick her up and she dangles from the back of her collar, swinging behind the hand that holds her. Leave her alone and she reads, does her homework, bounces a ball, sips tea or dozes off where she stands. That is a timer: she watches nothing you do. Her right-click menu can stop her playing or pin her in place. She is a layered illustration moved by a small rig written for this app, in the manner of Live2D. She is not a Live2D model and uses none of its software.
 
 Right-click Roo and choose **Change image**. PNG, JPG, WebP, BMP and GIF up to 20 MB work, and a GIF plays. Any picture bobs, squashes and hops, and the copy is kept in your archive, so the original can move.
 

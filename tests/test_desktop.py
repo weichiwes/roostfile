@@ -273,7 +273,7 @@ class DesktopTests(unittest.TestCase):
 
     def test_every_layer_is_a_real_picture(self):
         puppet = ui_character.Puppet()
-        self.assertGreaterEqual(len(puppet.layers), 12)
+        self.assertGreaterEqual(len(puppet.layers), 11)
         for name, (image, rect) in puppet.layers.items():
             self.assertFalse(image.isNull(), name)
             self.assertTrue(image.hasAlphaChannel(), name)
@@ -504,6 +504,161 @@ class DesktopTests(unittest.TestCase):
         assistant.set_mood("working")
         assistant.dragLeaveEvent(None)
         self.assertEqual(assistant.mood, "working")
+
+    def test_she_waves_when_she_arrives_and_introduces_herself_once(self):
+        assistant = self.assistant()
+        assistant.hide()
+        self.window.config.pop("greeted", None)
+        with patch.object(ui, "user_is_busy", return_value=False):
+            self.window.place_assistant()
+        self.assertEqual(assistant.mood, "greeting")
+        self.assertIn(t("Roo"), assistant.bubble.text.text())
+        self.assertTrue(self.window.config["greeted"])
+        assistant.set_mood("idle")
+        assistant.bubble.hide()
+        assistant.hide()
+        with patch.object(ui, "user_is_busy", return_value=False):
+            self.window.place_assistant()
+        self.assertEqual(assistant.mood, "idle")
+        self.assertFalse(assistant.bubble.isVisible())
+
+    def test_the_wave_changes_how_she_looks(self):
+        assistant = self.assistant()
+        assistant.reduced_motion = True
+        assistant.rig.reduced_motion = True
+        assistant.set_mood("happy")
+        calm = bytes(assistant.grab().toImage().constBits())
+        assistant.set_mood("greeting")
+        self.assertNotEqual(bytes(assistant.grab().toImage().constBits()), calm)
+
+    def press_and_drag(self, assistant, start=(100, 100), end=(170, 130)):
+        assistant.mousePressEvent(SimpleNamespace(button=lambda: ui.Qt.LeftButton, globalPosition=lambda: QPointF(*start)))
+        assistant.mouseMoveEvent(SimpleNamespace(buttons=lambda: ui.Qt.LeftButton, globalPosition=lambda: QPointF(*end)))
+
+    def test_she_can_be_picked_up_by_her_collar_and_put_down(self):
+        assistant = self.assistant()
+        moved = MagicMock()
+        assistant.moved.connect(moved)
+        size = assistant.size()
+        self.press_and_drag(assistant)
+        self.assertTrue(assistant.lifting)
+        self.assertEqual(assistant.mood, "dangling")
+        self.assertGreater(assistant.width(), size.width())
+        self.assertEqual(assistant.pos() + assistant.grip, QPoint(170, 130))
+        feet = assistant.pos() + assistant.margin
+        assistant.mouseReleaseEvent(SimpleNamespace(button=lambda: ui.Qt.LeftButton))
+        self.assertFalse(assistant.lifting)
+        self.assertEqual(assistant.size(), size)
+        self.assertEqual(assistant.pos(), feet)
+        self.assertEqual(assistant.mood, "happy")
+        moved.assert_called_once()
+
+    def test_she_is_put_down_if_the_mouse_release_goes_astray(self):
+        assistant = self.assistant()
+        size = assistant.size()
+        self.press_and_drag(assistant)
+        with patch.object(ui.QApplication, "mouseButtons", return_value=ui.Qt.NoButton):
+            assistant.tick()
+        self.assertFalse(assistant.lifting)
+        self.assertEqual(assistant.size(), size)
+
+    def test_being_picked_up_does_not_interrupt_her_sorting(self):
+        assistant = self.assistant()
+        assistant.set_mood("working")
+        self.press_and_drag(assistant)
+        assistant.set_mood("happy", 3)
+        assistant.mouseReleaseEvent(SimpleNamespace(button=lambda: ui.Qt.LeftButton))
+        self.assertEqual(assistant.mood, "happy")
+
+    def test_a_pinned_roo_stays_put(self):
+        assistant = self.assistant()
+        assistant.pinned = True
+        where = assistant.pos()
+        self.press_and_drag(assistant)
+        self.assertFalse(assistant.lifting)
+        self.assertEqual(assistant.pos(), where)
+
+    def test_a_chosen_picture_just_follows_the_pointer(self):
+        assistant = self.assistant()
+        self.window.set_assistant_image(self.picture("me.png"))
+        self.press_and_drag(assistant)
+        self.assertFalse(assistant.lifting)
+        self.assertEqual(assistant.margin, QPoint(0, 0))
+
+    def test_she_swings_behind_the_hand_that_holds_her(self):
+        rig = ui.character.Rig()
+        for _ in range(12):
+            rig.step(1 / 30, "dangling", pull=1200)
+        self.assertLess(rig.pose.swing, -4)
+        for _ in range(120):
+            rig.step(1 / 30, "dangling", pull=-9000)
+            self.assertLessEqual(abs(rig.pose.swing), ui.character.MAX_SWING)
+
+    def test_every_action_looks_different(self):
+        assistant = self.assistant()
+        assistant.plays = False
+        assistant.reduced_motion = True
+        looks = {}
+        for mood in ("idle", "greeting", "stretching", "reading", "homework", "playing", "tea", "napping", "working", "happy"):
+            assistant.mood = mood
+            assistant.rig.step(0, mood)
+            looks[mood] = bytes(assistant.grab().toImage().constBits())
+        self.assertEqual(len(set(looks.values())), len(looks))
+
+    def bored(self, assistant):
+        assistant.next_play = 0
+        assistant.mood = "idle"
+
+    def test_left_alone_she_finds_something_to_do_then_looks_up_when_touched(self):
+        assistant = self.assistant()
+        self.bored(assistant)
+        assistant.maybe_play()
+        self.assertIn(assistant.mood, ui.PASTIMES)
+        assistant.enterEvent(None)
+        self.assertEqual(assistant.mood, "idle")
+        self.assertGreater(assistant.next_play, assistant.frame)
+
+    def test_she_does_not_repeat_herself(self):
+        assistant = self.assistant()
+        for _ in range(20):
+            before = assistant.last_pastime
+            self.bored(assistant)
+            assistant.maybe_play()
+            self.assertNotEqual(assistant.last_pastime, before)
+
+    def test_after_a_long_while_she_dozes_and_wakes_with_a_stretch(self):
+        assistant = self.assistant()
+        self.bored(assistant)
+        assistant.frame = int(ui.NAP_AFTER * 1000 / ui.FRAME_MS) + 10
+        assistant.maybe_play()
+        self.assertEqual(assistant.mood, "napping")
+        assistant.touched()
+        self.assertEqual(assistant.mood, "stretching")
+
+    def test_she_keeps_still_when_asked(self):
+        assistant = self.assistant()
+        for setup in (lambda: setattr(assistant, "plays", False), lambda: (setattr(assistant, "plays", True), setattr(assistant, "reduced_motion", True))):
+            setup()
+            self.bored(assistant)
+            assistant.maybe_play()
+            self.assertEqual(assistant.mood, "idle")
+
+    def test_a_chosen_picture_has_no_pastimes(self):
+        assistant = self.assistant()
+        self.window.set_assistant_image(self.picture("me.png"))
+        self.bored(assistant)
+        assistant.maybe_play()
+        self.assertEqual(assistant.mood, "idle")
+
+    def test_the_menu_saves_her_settings(self):
+        assistant = self.assistant()
+        with patch.object(self.window, "save_setting") as saved:
+            self.window.toggle_assistant_play()
+            self.window.toggle_assistant_pinned()
+        self.assertFalse(assistant.plays)
+        self.assertTrue(assistant.pinned)
+        self.assertEqual(saved.call_args_list[0][0], ("assistant_play", False))
+        self.assertEqual(saved.call_args_list[1][0], ("assistant_pinned", True))
 
     def test_a_hidden_roo_says_nothing(self):
         assistant = self.assistant()

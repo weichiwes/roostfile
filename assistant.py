@@ -25,6 +25,10 @@ SIZES = {"small": 72, "medium": 96, "large": 128}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 FRAME_MS = 33
+# What she gets up to on her own, and for how many seconds.
+PASTIMES = {"reading": 24, "homework": 24, "playing": 12, "tea": 14, "stretching": 3}
+PLAY_AFTER = (15, 40)  # Seconds between one thing and the next.
+NAP_AFTER = 10 * 60  # Seconds nobody has touched her.
 GAZE_SOFTNESS = 260  # Logical pixels. Her eyes lean towards the pointer rather than snap to it.
 BUBBLE_WIDTH = 340
 
@@ -128,6 +132,18 @@ class Assistant(QWidget):
         self.hop = 0.0
         self.pressed_at = None
         self.travelled = False
+        self.lifting = False
+        self.margin = QPoint(0, 0)  # While she is held her window grows, so she can swing.
+        self.grip = QPoint(0, 0)
+        self.pull = 0.0
+        self.last_x = 0
+        self.after_lift = "idle"
+        self.plays = True
+        self.pinned = False
+        self.last_touch = 0
+        self.last_pastime = ""
+        self.next_play = random.uniform(*PLAY_AFTER) * 1000 / FRAME_MS
+        self.setCursor(Qt.OpenHandCursor)
         self.pictures = {}
         self.movies = {}
         self.bubble = Bubble()
@@ -188,11 +204,14 @@ class Assistant(QWidget):
         return None
 
     def set_mood(self, mood, seconds=0):
+        if self.lifting and mood != "dangling":
+            self.after_lift = mood  # She can only hang there until she is put down.
+            return
         self.mood = mood
         self.mood_timer.stop()
         if seconds:
             self.mood_timer.start(seconds * 1000)
-        if mood == "happy":
+        if mood in ("happy", "greeting"):
             self.hop = 1.0
         if self.reduced_motion:
             self.rig.step(0, mood)
@@ -207,14 +226,42 @@ class Assistant(QWidget):
         if not self.isVisible():
             return
         self.frame += 1
+        if self.lifting and not QApplication.mouseButtons() & Qt.LeftButton:
+            self.pressed_at = None  # The release went elsewhere, such as during Alt Tab. She must not hang there.
+            self.put_down()
         if not self.reduced_motion and random.random() < .0008:
             self.hop = 1.0
         self.hop = max(0.0, self.hop - .03)
         talking = self.frame < self.talk_until
-        pose = self.rig.step(FRAME_MS / 1000, self.mood, self.gaze(), talking)
+        self.pull += ((self.x() - self.last_x) * 1000 / FRAME_MS - self.pull) * .35 if self.lifting else -self.pull
+        self.last_x = self.x()
+        pose = self.rig.step(FRAME_MS / 1000, self.mood, self.gaze(), talking, self.pull)
+        self.maybe_play()
         # Sitting still needs few frames, and this runs all day.
-        if self.mood != "idle" or self.hop or talking or pose.eye_open < 1 or not self.frame % 2:
+        calm = self.mood == "idle" or self.mood in PASTIMES or self.mood == "napping"
+        if not calm or self.hop or talking or pose.eye_open < 1 or not self.frame % 2:
             self.update()
+
+    def maybe_play(self):
+        """Left alone, she finds something to do where she stands. This is a timer: it watches nothing."""
+        if self.mood != "idle" or not self.plays or self.custom or self.reduced_motion or self.frame < self.next_play:
+            return
+        if (self.frame - self.last_touch) * FRAME_MS / 1000 > NAP_AFTER:
+            self.set_mood("napping")
+            return
+        self.last_pastime = random.choice([name for name in PASTIMES if name != self.last_pastime])
+        seconds = PASTIMES[self.last_pastime]
+        self.set_mood(self.last_pastime, seconds)
+        self.next_play = self.frame + (seconds + random.uniform(*PLAY_AFTER)) * 1000 / FRAME_MS
+
+    def touched(self):
+        """Someone has noticed her, so she looks up from whatever she was doing."""
+        self.last_touch = self.frame
+        self.next_play = self.frame + random.uniform(*PLAY_AFTER) * 1000 / FRAME_MS
+        if self.mood == "napping":
+            self.set_mood("stretching", PASTIMES["stretching"])
+        elif self.mood in PASTIMES:
+            self.set_mood("idle")
 
     def gaze(self):
         """Which way the pointer is, from -1 to 1, so her eyes can follow it. It is not kept."""
@@ -225,7 +272,7 @@ class Assistant(QWidget):
 
     def pose(self):
         """(lift, squash, tilt) for this moment, shared by Roo and any picture."""
-        if self.reduced_motion:
+        if self.reduced_motion or self.lifting:
             return 0.0, 1.0, 0.0
         now = self.frame * FRAME_MS / 1000
         if self.mood == "working":
@@ -239,28 +286,32 @@ class Assistant(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        side = float(self.width())
+        side = float(SIZES[self.size_name])
+        height = round(side * 1.25)
         lift, squash, tilt = self.pose()
         painter.setPen(Qt.NoPen)
         # Fully clear pixels let clicks and drops through to the desktop, so a near miss would be lost.
         painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
-        painter.setBrush(QColor(0, 0, 0, 46))
-        painter.drawEllipse(QRectF(side * .24, self.height() - side * .1, side * .52, side * .08))
+        painter.translate(self.margin)
+        if not self.lifting:
+            painter.setBrush(QColor(0, 0, 0, 46))
+            painter.drawEllipse(QRectF(side * .24, height - side * .1, side * .52, side * .08))
         picture = self.picture()
         drawn = picture is not None and not picture.isNull()
         if not drawn:  # She leans and breathes for herself, so the hops stay small.
             lift, squash, tilt = lift * side / 110, 1 + (squash - 1) * .6, 0.0
-        painter.translate(side / 2, self.height() - side * .06 - lift)
+        painter.translate(side / 2, height - side * .06 - lift)
         painter.rotate(tilt)
         painter.scale(2 - squash, squash)
         if drawn:
-            scaled = picture.size().scaled(round(side), round(self.height() * .92), Qt.KeepAspectRatio)
+            scaled = picture.size().scaled(round(side), round(height * .92), Qt.KeepAspectRatio)
             painter.drawPixmap(QRectF(-scaled.width() / 2, -scaled.height(), scaled.width(), scaled.height()), picture, QRectF(picture.rect()))
         else:
             self.puppet.draw(painter, side * .98, self.rig.pose, self.devicePixelRatioF())
 
     def enterEvent(self, event):
         self.hop = max(self.hop, .5)
+        self.touched()
 
     @staticmethod
     def take_as_copy(event):
@@ -274,6 +325,7 @@ class Assistant(QWidget):
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls() and any(url.isLocalFile() for url in event.mimeData().urls()) and self.take_as_copy(event) and self.mood != "working":
+            self.touched()
             self.set_mood("excited")
 
     def dragMoveEvent(self, event):
@@ -293,22 +345,57 @@ class Assistant(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.pressed_at = event.globalPosition().toPoint() - self.pos()
+            self.grip = self.pressed_at
             self.travelled = False
+            self.touched()
 
     def mouseMoveEvent(self, event):
-        if self.pressed_at is not None and event.buttons() & Qt.LeftButton:
-            target = event.globalPosition().toPoint() - self.pressed_at
-            if (target - self.pos()).manhattanLength() > 3:
-                self.travelled = True
-            if self.travelled:
-                self.move(target)
-                self.bubble.hide()
+        if self.pressed_at is None or self.pinned or not event.buttons() & Qt.LeftButton:
+            return
+        where = event.globalPosition().toPoint()
+        if not self.travelled:
+            if (where - self.pos() - self.pressed_at).manhattanLength() <= 3:
+                return
+            self.travelled = True
+            self.bubble.hide()
+            self.pick_up()
+        self.move(where - self.grip)
+
+    def pick_up(self):
+        """By the back of her collar. A picture has no collar, so it just follows the pointer."""
+        if self.custom:
+            return
+        side = SIZES[self.size_name]
+        height = round(side * 1.25)
+        scale = side * .98 / self.puppet.width
+        at = self.puppet.grip
+        self.margin = QPoint(round(side * .5), round(side * .6))
+        self.after_lift = "working" if self.mood == "working" else "idle"
+        self.mood_timer.stop()
+        self.setFixedSize(side + self.margin.x() * 2, height + self.margin.y() + round(side * .3))
+        self.grip = self.margin + QPoint(round(side / 2 + (at.x() - self.puppet.width / 2) * scale),
+                                         round(height - side * .06 + (at.y() - self.puppet.height) * scale))
+        self.set_mood("dangling")
+        self.lifting = True
+        self.last_x = self.x()
+        self.setCursor(Qt.BlankCursor)  # Her own drawn hand takes the pointer's place.
+
+    def put_down(self):
+        if self.lifting:
+            spot = self.pos() + self.margin
+            self.lifting = False
+            self.margin = QPoint(0, 0)
+            self.set_size(self.size_name)
+            self.move(spot)
+            self.setCursor(Qt.OpenHandCursor)
+            self.set_mood(self.after_lift) if self.after_lift != "idle" else self.set_mood("happy", 1)
+        self.moved.emit(self.pos())
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self.pressed_at is not None:
             self.pressed_at = None
             if self.travelled:
-                self.moved.emit(self.pos())
+                self.put_down()
             else:
                 self.hop = 1.0
                 self.rig.poke()

@@ -37,7 +37,8 @@ from core import ArchiveCore, MAX_PREVIEW_ROWS, TABLE_EXTS, _assert_local_path, 
 from demo import demo_data_dir, prepare_demo
 from i18n import LANGUAGES, app_name, condition_label, language, set_language, t
 import ocr
-from assistant import SIZES, Assistant, clear_images, install_image, install_image_set
+from assistant import FRAME_MS, NAP_AFTER, PASTIMES, SIZES, Assistant, clear_images, install_image, install_image_set
+import character
 from pages import page_count, render_page
 from search_ux import KIND_EXTS, example_word, explain_matches, file_group, highlight_spans, parse_query, related_queries, resolve_filters, topic_of
 from theme import (
@@ -984,6 +985,7 @@ class ArchiveWindow(QMainWindow):
         self.signals.reading.connect(self.reading_progress)
         self.signals.sorted.connect(self.finish_sorting)
         self.assistant = None
+        self.assistant_greeted = False
         self.scan_partial = False
         self.sorting = []
         self.ocr_thread = None
@@ -2449,6 +2451,8 @@ class ArchiveWindow(QMainWindow):
         self.assistant.dropped.connect(self.organise_drop)
         self.assistant.menu_requested.connect(lambda position: popup(self.assistant_menu(), position))
         self.assistant.moved.connect(lambda position: self.save_setting("assistant_at", [position.x(), position.y()]))
+        self.assistant.plays = self.config.get("assistant_play", True)
+        self.assistant.pinned = self.config.get("assistant_pinned", False)
         self.assistant_watch = QTimer(self)
         self.assistant_watch.timeout.connect(self.place_assistant)
         self.assistant_watch.start(3000)
@@ -2469,6 +2473,17 @@ class ArchiveWindow(QMainWindow):
                 start = QPoint(area.right() - self.assistant.width() - 24, area.bottom() - self.assistant.height() - 24)
             self.assistant.move(start)
             self.assistant.show()
+            self.greet()
+
+    def greet(self):
+        """She waves each time she arrives, and introduces herself the first time."""
+        if self.assistant_greeted:
+            return
+        self.assistant_greeted = True
+        self.assistant.set_mood("greeting", 3)
+        if not self.config.get("greeted"):
+            self.assistant.say(t("Hi! I'm {name}.", name=t("Roo")), 4)
+            self.save_setting("greeted", True)
 
     def assistant_menu(self):
         menu = QMenu(self)
@@ -2479,6 +2494,12 @@ class ArchiveWindow(QMainWindow):
         menu.addAction(t("Use an image for each mood"), self.choose_assistant_images)
         if self.assistant.custom:
             menu.addAction(t("Back to {name}", name=t("Roo")), self.reset_assistant)
+        plays = menu.addAction(t("Let {name} play on her own", name=t("Roo")), self.toggle_assistant_play)
+        plays.setCheckable(True)
+        plays.setChecked(self.assistant.plays)
+        pinned = menu.addAction(t("Pin {name} here", name=t("Roo")), self.toggle_assistant_pinned)
+        pinned.setCheckable(True)
+        pinned.setChecked(self.assistant.pinned)
         sizes = menu.addMenu(t("Size on screen"))
         for name, title in (("small", "Small"), ("medium", "Medium"), ("large", "Large")):
             choice = sizes.addAction(t(title), lambda checked=False, n=name: self.resize_assistant(n))
@@ -2487,6 +2508,15 @@ class ArchiveWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction(t("Hide {name}", name=t("Roo")), lambda: self.show_assistant(False))
         return menu
+
+    def toggle_assistant_play(self):
+        self.assistant.plays = not self.assistant.plays
+        self.save_setting("assistant_play", self.assistant.plays)
+
+    def toggle_assistant_pinned(self):
+        self.assistant.pinned = not self.assistant.pinned
+        self.assistant.setCursor(Qt.ArrowCursor if self.assistant.pinned else Qt.OpenHandCursor)
+        self.save_setting("assistant_pinned", self.assistant.pinned)
 
     def show_assistant(self, shown):
         self.save_setting("assistant", shown)
