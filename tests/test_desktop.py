@@ -16,8 +16,9 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import desktop_app as ui
 from assistant import BUBBLE_WIDTH
+import character as ui_character
 from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, QTimer, QUrl
-from PySide6.QtGui import QCloseEvent, QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QEnterEvent, QImage, QKeyEvent, QTextDocument
+from PySide6.QtGui import QCloseEvent, QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QEnterEvent, QImage, QKeyEvent, QPainter, QTextDocument
 from PySide6.QtTest import QTest
 from demo import prepare_demo
 from i18n import set_language, t
@@ -225,6 +226,74 @@ class DesktopTests(unittest.TestCase):
                     middle = image.pixelColor(image.width() // 2, int(image.height() * .75))
                     self.assertGreater(middle.alpha(), 200)
                     self.assertNotEqual(middle.getRgb()[:3], (0, 0, 0))
+
+    def test_her_eyes_follow_and_she_blinks(self):
+        rig = ui_character.Rig()
+        pose = None
+        for _ in range(60):
+            pose = rig.step(1 / 30, "idle", (.9, 0))
+        self.assertGreater(pose.eye_x, .7)
+        self.assertGreater(pose.angle_x, .5)
+        rig.next_blink = 0
+        shut = min(rig.step(1 / 30).eye_open for _ in range(8))
+        self.assertLess(shut, .3)
+        self.assertGreater(max(rig.step(1 / 30).eye_open for _ in range(8)), .9)
+
+    def test_her_hair_swings_when_she_turns_and_then_settles(self):
+        rig = ui_character.Rig()
+        with patch.object(ui_character.math, "sin", return_value=0.0):
+            for _ in range(5):
+                rig.step(1 / 30, "idle", (.9, 0))
+            self.assertGreater(abs(rig.pose.sway), 1)
+            for _ in range(300):
+                rig.step(1 / 30, "idle", (.9, 0))
+            self.assertLess(abs(rig.pose.sway), .5)
+
+    def test_the_rig_cannot_blow_up_at_a_long_frame(self):
+        rig = ui_character.Rig()
+        for look in ((1, 1), (-1, -1)) * 20:
+            pose = rig.step(.2, "excited", look, True)
+            self.assertLessEqual(abs(pose.sway), 20)
+            self.assertTrue(all(abs(getattr(pose, field.name)) < 1e4 for field in ui_character.fields(pose)))
+
+    def test_her_irises_stay_inside_her_eyes(self):
+        puppet = ui_character.Puppet()
+        puppet.prepare(192)
+        self.assertFalse(puppet.white_outline.isEmpty())
+        looked = []
+        for look in (-1, 1):
+            image = QImage(192, 230, QImage.Format_ARGB32_Premultiplied)
+            image.fill(0)
+            painter = QPainter(image)
+            painter.translate(96, 226)
+            puppet.draw(painter, 192, ui_character.Pose(eye_x=look))
+            painter.end()
+            looked.append(bytes(image.constBits()))
+        self.assertNotEqual(*looked)
+
+    def test_every_layer_is_a_real_picture(self):
+        puppet = ui_character.Puppet()
+        self.assertGreaterEqual(len(puppet.layers), 12)
+        for name, (image, rect) in puppet.layers.items():
+            self.assertFalse(image.isNull(), name)
+            self.assertTrue(image.hasAlphaChannel(), name)
+        self.assertLess(sum(path.stat().st_size for path in ui_character.ASSETS.iterdir()), 1024 * 1024)
+
+    def test_she_stays_icon_sized(self):
+        self.assertEqual(ui.SIZES, {"small": 72, "medium": 96, "large": 128})
+        assistant = self.assistant()
+        assistant.set_size("medium")
+        self.assertLessEqual(assistant.height(), 125)
+
+    def test_hair_bending_is_cached_not_redrawn(self):
+        puppet = ui_character.Puppet()
+        puppet.prepare(96)
+        image = QImage(96, 120, QImage.Format_ARGB32_Premultiplied)
+        painter = QPainter(image)
+        for _ in range(4):
+            puppet.draw(painter, 96, ui_character.Pose(sway=4.0))
+        painter.end()
+        self.assertEqual(len(puppet.bent), 3)
 
     def test_the_whole_window_catches_a_drop(self):
         # Fully clear pixels let a drop fall through to the desktop.
@@ -475,6 +544,9 @@ class DesktopTests(unittest.TestCase):
         assistant.set_mood("excited")
         assistant.frame = 13
         self.assertEqual(assistant.pose(), (0.0, 1.0, 0.0))
+        looking = [assistant.rig.step(1 / 30, "excited", (1, 1), True) for _ in range(5)][-1]
+        self.assertEqual((looking.eye_x, looking.breath, looking.sway), (0, 0, 0))
+        self.assertEqual(assistant.gaze(), (0.0, 0.0))
         assistant.reduced_motion = False
         self.assertNotEqual(assistant.pose(), (0.0, 1.0, 0.0))
 

@@ -30,7 +30,7 @@ People do not open a file tool to browse. They reach for it in the middle of som
 
 ## What this rules out
 
-- **Almost nothing stays on screen.** The arrival bar appears only when there is news. Roo is the one exception, because it has to be there to take a drop: it can be hidden, and neither appears during a full-screen game, film or presentation.
+- **Almost nothing stays on screen.** The arrival bar appears only when there is news. Roo is the one exception, because she has to be there to take a drop: she can be hidden, and neither appears during a full-screen game, film or presentation.
 - **Nothing takes the keyboard uninvited.** A notice that interrupts typing costs more than it saves.
-- **No guessing unless asked.** A wrong guess about Fang's documents is worse than no guess, so sorting by subject happens only for files someone hands to Roo, and it says what it did.
+- **No guessing unless asked.** A wrong guess about Fang's documents is worse than no guess, so sorting by subject happens only for files someone hands to Roo, and she says what she did.
 - **Nothing leaves the computer.** Fang's files are the reason this cannot be a cloud service.

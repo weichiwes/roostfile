@@ -974,7 +974,7 @@ nas:/export on /Volumes/my files (nfs, nodev)
     def test_no_module_can_reach_a_network(self):
         banned = {"socket", "ssl", "http", "urllib", "ftplib", "smtplib", "telnetlib", "xmlrpc", "webbrowser", "requests", "httpx", "aiohttp"}
         root = Path(core_module.__file__).parent
-        for name in ("core", "search_ux", "mcp_server", "desktop_app", "assistant", "background", "visual_widgets", "ocr", "pages", "demo", "i18n", "theme"):
+        for name in ("core", "search_ux", "mcp_server", "desktop_app", "assistant", "character", "background", "visual_widgets", "ocr", "pages", "demo", "i18n", "theme"):
             source = (root / f"{name}.py").read_text(encoding="utf-8")
             for node in ast.walk(ast.parse(source)):
                 modules = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or ""] if isinstance(node, ast.ImportFrom) else []
@@ -992,6 +992,9 @@ nas:/export on /Volumes/my files (nfs, nodev)
         archive = package_windows.build(python, vendor, out, "app")
         names = zipfile.ZipFile(archive).namelist()
         self.assertIn("app/.vendor/PySide6/a.pyd", names)
+        self.assertIn("app/character.py", names)
+        self.assertIn("app/assets/roo/layers.json", names)
+        self.assertIn("app/assets/roo/front-hair.png", names)
         self.assertFalse([name for name in names if "/bin/" in name or "/data/" in name or name.endswith((".sqlite3", "ui-state.json"))])
 
     def names(self):

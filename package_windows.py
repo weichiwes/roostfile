@@ -12,7 +12,7 @@ import zipfile
 
 BASE = Path(__file__).resolve().parent
 APP_FILES = (
-    "desktop_app.py", "visual_widgets.py", "search_ux.py", "core.py", "background.py", "pages.py", "ocr.py", "assistant.py", "mcp_server.py",
+    "desktop_app.py", "visual_widgets.py", "search_ux.py", "core.py", "background.py", "pages.py", "ocr.py", "assistant.py", "character.py", "mcp_server.py",
     "i18n.py", "theme.py", "demo.py", "offline.py", "launch.ps1", "start.cmd", "demo.cmd", "README.md", "README.zh-CN.md",
     "LICENSE", "THIRD_PARTY_NOTICES.md",
 )
@@ -30,6 +30,7 @@ def build(python: Path, vendor: Path, out: Path, name: str) -> Path:
     folder.mkdir(parents=True)
     for file in APP_FILES:
         shutil.copy2(BASE / file, folder / file)
+    shutil.copytree(BASE / "assets", folder / "assets")
     shutil.copytree(python, folder / "runtime")
     shutil.copytree(vendor, folder / ".vendor", ignore=SKIPPED)
     # pip's launchers are not used here, and each one records the path of the Python that made it.

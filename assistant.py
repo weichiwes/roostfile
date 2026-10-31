@@ -1,8 +1,8 @@
 """Roo, the small desktop assistant: a drop target with a bit of life in it.
 
-It is drawn here, so it needs no image files, and any picture can replace it. The
-same movement applies to every look, so a person's own image feels just as alive.
-Name a folder's pictures idle, excited, working and happy to give each mood its own.
+She is the puppet in character.py, and any picture can replace her. Hops and
+bounces apply to every look, so a person's own image feels alive too. Name a
+folder's pictures idle, excited, working and happy to give each mood its own.
 """
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ import random
 import shutil
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QMovie, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QMovie, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QWidget
 
+from character import Puppet, Rig
 from core import _assert_local_path
 from pages import image_reader
 from theme import BG, HAIRLINE_STRONG, TEXT
@@ -23,11 +24,8 @@ MOODS = ("idle", "excited", "working", "happy")
 SIZES = {"small": 72, "medium": 96, "large": 128}
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
-BODY = "#7FB08F"
-BELLY = "#E8F1E4"
-BEAK = "#E9B872"
-INK = "#1C2A20"
 FRAME_MS = 33
+GAZE_SOFTNESS = 260  # Logical pixels. Her eyes lean towards the pointer rather than snap to it.
 BUBBLE_WIDTH = 340
 
 
@@ -123,9 +121,10 @@ class Assistant(QWidget):
         self.setToolTip("")
         self.images_folder = Path(images_folder)
         self.mood = "idle"
-        self.reduced_motion = reduced_motion
+        self.puppet = Puppet()
+        self.rig = Rig(reduced_motion)
         self.frame = 0
-        self.blink = 0
+        self.talk_until = 0
         self.hop = 0.0
         self.pressed_at = None
         self.travelled = False
@@ -141,10 +140,18 @@ class Assistant(QWidget):
         self.mood_timer.setSingleShot(True)
         self.mood_timer.timeout.connect(lambda: self.set_mood("idle"))
 
+    @property
+    def reduced_motion(self):
+        return self.rig.reduced_motion
+
+    @reduced_motion.setter
+    def reduced_motion(self, value):
+        self.rig.reduced_motion = value
+
     def set_size(self, name):
         self.size_name = name if name in SIZES else "medium"
         side = SIZES[self.size_name]
-        self.setFixedSize(side, round(side * 1.2))
+        self.setFixedSize(side, round(side * 1.25))
 
     def release_images(self):
         """A playing GIF keeps its file open, and Windows will not replace an open file."""
@@ -187,26 +194,34 @@ class Assistant(QWidget):
             self.mood_timer.start(seconds * 1000)
         if mood == "happy":
             self.hop = 1.0
+        if self.reduced_motion:
+            self.rig.step(0, mood)
         self.update()
 
     def say(self, text, seconds=5):
         if self.isVisible():  # Hidden for a game or a presentation, so it keeps quiet too.
             self.bubble.say(text, QRectF(self.geometry()), seconds)
+            self.talk_until = self.frame + min(90, 12 + len(text) * 2)
 
     def tick(self):
         if not self.isVisible():
             return
         self.frame += 1
-        if self.blink:
-            self.blink -= 1
-        elif random.random() < .006:
-            self.blink = 5
         if not self.reduced_motion and random.random() < .0008:
             self.hop = 1.0
         self.hop = max(0.0, self.hop - .03)
+        talking = self.frame < self.talk_until
+        pose = self.rig.step(FRAME_MS / 1000, self.mood, self.gaze(), talking)
         # Sitting still needs few frames, and this runs all day.
-        if self.mood != "idle" or self.hop or self.blink or not self.frame % 3:
+        if self.mood != "idle" or self.hop or talking or pose.eye_open < 1 or not self.frame % 2:
             self.update()
+
+    def gaze(self):
+        """Which way the pointer is, from -1 to 1, so her eyes can follow it. It is not kept."""
+        if self.reduced_motion:
+            return 0.0, 0.0
+        offset = QCursor.pos() - self.geometry().center()
+        return offset.x() / (abs(offset.x()) + GAZE_SOFTNESS), offset.y() / (abs(offset.y()) + GAZE_SOFTNESS)
 
     def pose(self):
         """(lift, squash, tilt) for this moment, shared by Roo and any picture."""
@@ -230,74 +245,19 @@ class Assistant(QWidget):
         # Fully clear pixels let clicks and drops through to the desktop, so a near miss would be lost.
         painter.fillRect(self.rect(), QColor(0, 0, 0, 1))
         painter.setBrush(QColor(0, 0, 0, 46))
-        painter.drawEllipse(QRectF(side * .2, self.height() - side * .14, side * .6, side * .09))
-        painter.translate(side / 2, self.height() - side * .1 - lift)
+        painter.drawEllipse(QRectF(side * .24, self.height() - side * .1, side * .52, side * .08))
+        picture = self.picture()
+        drawn = picture is not None and not picture.isNull()
+        if not drawn:  # She leans and breathes for herself, so the hops stay small.
+            lift, squash, tilt = lift * side / 110, 1 + (squash - 1) * .6, 0.0
+        painter.translate(side / 2, self.height() - side * .06 - lift)
         painter.rotate(tilt)
         painter.scale(2 - squash, squash)
-        picture = self.picture()
-        if picture is not None and not picture.isNull():
+        if drawn:
             scaled = picture.size().scaled(round(side), round(self.height() * .92), Qt.KeepAspectRatio)
             painter.drawPixmap(QRectF(-scaled.width() / 2, -scaled.height(), scaled.width(), scaled.height()), picture, QRectF(picture.rect()))
         else:
-            self.draw_roo(painter, side)
-
-    def draw_roo(self, p, side):
-        """A small round bird. Everything is proportional, so every size stays crisp."""
-        unit = side / 118  # Room for the wings at full stretch.
-        p.scale(unit, unit)
-        p.setPen(QPen(QColor(BEAK), 3, Qt.SolidLine, Qt.RoundCap))
-        for x in (-11, 11):
-            p.drawLine(QPointF(x, -6), QPointF(x, 0))
-            p.drawLine(QPointF(x, 0), QPointF(x + 5, 1))
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(BODY))
-        p.drawEllipse(QRectF(-36, -80, 72, 76))
-        tail = QPainterPath(QPointF(32, -30))
-        tail.lineTo(50, -38)
-        tail.lineTo(35, -18)
-        p.drawPath(tail)
-        p.setBrush(QColor(BELLY))
-        p.drawEllipse(QRectF(-24, -50, 48, 44))
-        flap = 0.0
-        if not self.reduced_motion and self.mood in ("excited", "working", "happy"):
-            flap = 18 * math.sin(self.frame * .5)
-        p.setBrush(QColor("#5F9273"))
-        for x, turn in ((-34, flap), (34, -flap)):
-            p.save()
-            p.translate(x, -42)
-            p.rotate(turn + (28 if x < 0 else -28) if self.mood == "excited" else turn)
-            p.drawEllipse(QRectF(-8, -3, 16, 30))
-            p.restore()
-        p.setBrush(QColor(INK))
-        pen = QPen(QColor(INK), 3, Qt.SolidLine, Qt.RoundCap)
-        for x in (-14, 14):
-            if self.mood == "happy":
-                p.setPen(pen)
-                p.setBrush(Qt.NoBrush)
-                p.drawArc(QRectF(x - 6, -66, 12, 11), 0, 180 * 16)
-                p.setBrush(QColor(INK))
-                p.setPen(Qt.NoPen)
-            elif self.blink:
-                p.setPen(pen)
-                p.drawLine(QPointF(x - 5, -60), QPointF(x + 5, -60))
-                p.setPen(Qt.NoPen)
-            else:
-                look = 2.5 * math.sin(self.frame * .2) if self.mood == "working" and not self.reduced_motion else 0
-                p.drawEllipse(QPointF(x + look, -60), 4.5, 5 if self.mood != "excited" else 6.5)
-                p.setBrush(QColor(255, 255, 255))
-                p.drawEllipse(QPointF(x + look + 1.5, -62), 1.5, 1.5)
-                p.setBrush(QColor(INK))
-        beak = QPainterPath(QPointF(-7, -54))
-        beak.lineTo(7, -54)
-        beak.lineTo(0, -44 if self.mood != "excited" else -40)
-        beak.closeSubpath()
-        p.setBrush(QColor(BEAK))
-        p.drawPath(beak)
-        if self.mood == "working":
-            p.setBrush(QColor(BEAK))
-            for n in range(3):
-                angle = (0 if self.reduced_motion else self.frame * .18) + n * 2.1
-                p.drawEllipse(QPointF(42 * math.cos(angle), -84 + 6 * math.sin(angle)), 2.6, 2.6)
+            self.puppet.draw(painter, side * .98, self.rig.pose, self.devicePixelRatioF())
 
     def enterEvent(self, event):
         self.hop = max(self.hop, .5)
@@ -351,6 +311,7 @@ class Assistant(QWidget):
                 self.moved.emit(self.pos())
             else:
                 self.hop = 1.0
+                self.rig.poke()
                 self.clicked.emit()
 
     def contextMenuEvent(self, event):

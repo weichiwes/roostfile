@@ -16,7 +16,7 @@ A private file archive for your own computer. Add the folders you choose, then f
 
 ![Quick search](previews/windows/en-quick.png)
 
-- **Hand files to Roo.** A small bird sits on your desktop. Drop files or a folder on it and it reads them, then files each one in a collection named for its subject, such as Contract or Invoice. Nothing is moved. Click it to search, drag it anywhere, or replace it with your own picture.
+- **Hand files to Roo.** A tiny chibi assistant stands on your desktop. Drop files or a folder on her and she reads them, hugging a folder as she works, then files each one in a collection named for its subject, such as Contract or Invoice. Nothing is moved. Click her to search, drag her anywhere, or replace her with your own picture.
 - **Connect your own tools.** An MCP server lets assistants and workflows search and read your archive, once you allow it in Settings.
 - **Index in place or keep a copy.** Choose per folder, and switch at any time. Original files are never moved, renamed or deleted.
 - **See what just arrived.** When a new file lands, a small bar appears at the top of the screen with Copy and Open. It never takes the keyboard, and it stays away during games and presentations.
@@ -36,13 +36,15 @@ A private file archive for your own computer. Add the folders you choose, then f
 
 ## Make Roo your own
 
-![Roo at rest, blinking, excited, working and happy](previews/roo.png)
+![Roo at rest, blinking, excited, hugging a folder and happy](previews/roo.png)
 
-Right-click Roo and choose **Change image**. PNG, JPG, WebP, BMP and GIF up to 20 MB work, and a GIF plays. Any picture bobs, squashes and hops the way Roo does, and the copy is kept in your archive, so the original can move.
+Her eyes follow your pointer, she blinks, breathes and talks, and her hair swings as she moves. She is a layered illustration moved by a small rig written for this app, in the manner of Live2D. She is not a Live2D model and uses none of its software.
+
+Right-click Roo and choose **Change image**. PNG, JPG, WebP, BMP and GIF up to 20 MB work, and a GIF plays. Any picture bobs, squashes and hops, and the copy is kept in your archive, so the original can move.
 
 For a different look per mood, choose **Use an image for each mood** and pick a folder holding any of `idle`, `excited`, `working` and `happy`, such as `happy.png`. Moods without a picture use `idle`.
 
-Roo steps aside during games and presentations, and can be hidden from its menu or from Settings. Reduce motion keeps it still.
+Roo steps aside during games and presentations, and can be hidden from her menu or from Settings. Reduce motion keeps her still.
 
 ## Connect your own tools
 
@@ -128,7 +130,7 @@ Scripts and programs are shown in their folder rather than run.
 
 Roostfile has no account, no telemetry and no update check, and it never connects to the internet. The app blocks its own network sockets at startup, refuses network folders, and does not follow the links to other computers that SVG files and rich text can carry. On a test run a system call trace on Linux recorded no internet connections, and neither did watching the app's network endpoints on Windows. The same test has not been run on a Mac.
 
-Only folders you add and files you drop on Roo are read. A single dropped file brings nothing else from its folder. Connected tools have no access until you allow it, and a tool you connect can read the text of your files and may send it to an online service, depending on that tool. Words in photos and scans are read on this computer by Windows, and nothing is uploaded. Closing the window keeps the app running in the tray, for the shortcut and for change notices; you can turn that off in Settings, and starting with Windows is off until you turn it on. The app makes no network requests: it has no accounts, telemetry or update checks, and it blocks Python sockets at startup. That check is inside the app, not a firewall. Opening a file hands it to your default app, which behaves as that app does. Network paths and mapped drives are refused, and cloud placeholders are skipped so that browsing never triggers a download.
+Only folders you add and files you drop on Roo are read. Her eyes follow the pointer's position, which is not stored. A single dropped file brings nothing else from its folder. Connected tools have no access until you allow it, and a tool you connect can read the text of your files and may send it to an online service, depending on that tool. Words in photos and scans are read on this computer by Windows, and nothing is uploaded. Closing the window keeps the app running in the tray, for the shortcut and for change notices; you can turn that off in Settings, and starting with Windows is off until you turn it on. The app makes no network requests: it has no accounts, telemetry or update checks, and it blocks Python sockets at startup. That check is inside the app, not a firewall. Opening a file hands it to your default app, which behaves as that app does. Network paths and mapped drives are refused, and cloud placeholders are skipped so that browsing never triggers a download.
 
 One thing changes this, and only if you turn it on. A tool connected over MCP can read the text of your files, and that tool may send it to an online service. It is off by default, and Settings says so next to the switch.
 
@@ -136,7 +138,7 @@ One thing changes this, and only if you turn it on. A tool connected over MCP ca
 
 Search uses keywords. There is no semantic model, and nothing recognises what a photo shows or what is said in audio.
 
-- Roo sorts by matching words, not by understanding. It looks for about 25 everyday subjects in the file name, then in the text, and uses the file type when none fits. It can be wrong, and removing a file from a collection takes one click.
+- Roo sorts by matching words, not by understanding. She looks for about 25 everyday subjects in the file name, then in the text, and uses the file type when none fits. She can be wrong, and removing a file from a collection takes one click.
 - Reading text from images can get similar characters wrong, such as 金 and 全, so a word in a photo can be missed. It needs Windows' text recognition for your language, which Chinese and English Windows normally include. Scanned PDFs are read up to their first 20 pages.
 - Versions are told apart by name within one folder, not by comparing what is inside the files.
 - PDF text comes from the first 100 pages, up to about 200,000 characters. Files over 24 MB are indexed by name and details only.
@@ -153,7 +155,8 @@ Search uses keywords. There is no semantic model, and nothing recognises what a 
 | File | Purpose |
 | --- | --- |
 | `desktop_app.py` | Main window, filters, preview, sources, settings |
-| `assistant.py` | Roo: drawing, moods, chosen pictures and taking drops |
+| `assistant.py` | Roo's window: moods, chosen pictures and taking drops |
+| `character.py` | Roo's rig: the layers in `assets/roo` and what moves them |
 | `mcp_server.py` | MCP server for connected tools. Standard library only, and no Qt |
 | `visual_widgets.py` | Deck, hover behaviour and file covers |
 | `background.py` | Everything that differs by system: global shortcut, one running copy, starting at sign-in, change notices |
