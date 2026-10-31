@@ -1,0 +1,4 @@
+# For the preview GIF and tests.
+Pillow
+# Only for tests: the reference client the MCP server is checked against.
+mcp>=2

@@ -1,0 +1,17 @@
+# Installed into .vendor during setup. The application never downloads packages at runtime.
+PySide6-Essentials==6.10.3
+pypdf==6.21.4
+pypdfium2==5.14.0
+# The recogniser built into Windows, reached through these small bindings.
+winrt-runtime==4.0.3; sys_platform == "win32"
+winrt-Windows.Foundation==4!10.0.28000.2705; sys_platform == "win32"
+winrt-Windows.Foundation.Collections==4!10.0.28000.2705; sys_platform == "win32"
+winrt-Windows.Globalization==4!10.0.28000.2705; sys_platform == "win32"
+winrt-Windows.Graphics.Imaging==4!10.0.28000.2705; sys_platform == "win32"
+winrt-Windows.Media.Ocr==4!10.0.28000.2705; sys_platform == "win32"
+winrt-Windows.Storage==4!10.0.28000.2705; sys_platform == "win32"
+winrt-Windows.Storage.Streams==4!10.0.28000.2705; sys_platform == "win32"
+# The same jobs on macOS: Apple's Vision framework, and change notices from FSEvents.
+pyobjc-framework-Vision; sys_platform == "darwin"
+pyobjc-framework-Cocoa; sys_platform == "darwin"
+watchdog; sys_platform == "darwin"
