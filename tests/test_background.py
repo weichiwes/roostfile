@@ -181,10 +181,13 @@ class WindowsFolderWatchTests(unittest.TestCase):
         self.assertTrue(self.noticed())
         self.calls.clear()
         (deep / "新文件.txt").write_text("内容", encoding="utf-8")
-        self.assertTrue(self.noticed())
-        folder, paths = self.calls[0]
-        self.assertEqual(folder, str(self.folder))
-        self.assertIn(os.path.join("工作", "合同", "新文件.txt"), paths)
+        # A late notice about the new folders can arrive first, so wait for the file's own.
+        wanted = os.path.join("工作", "合同", "新文件.txt")
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not any(wanted in (paths or ()) for _, paths in self.calls):
+            time.sleep(.01)
+        self.assertIn(wanted, [path for _, paths in self.calls for path in paths or ()])
+        self.assertEqual(self.calls[0][0], str(self.folder))
 
     def test_system_and_temporary_files_do_not_wake_a_scan(self):
         (self.folder / "desktop.ini").write_text("x", encoding="utf-8")
