@@ -1,5 +1,6 @@
 __pycache__/
 data/
+library/
 .demo-data/
 demo-files/
 tests/.tmp-root/
@@ -7,3 +8,4 @@ tests/.tmp-root/
 .vendor/
 .venv*/
 dist/
+art/

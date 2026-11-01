@@ -1,5 +1,6 @@
 """Native Qt integration tests, restricted to the synthetic demo archive."""
 import json
+import math
 import os
 import socket
 import sqlite3
@@ -18,7 +19,7 @@ import desktop_app as ui
 from assistant import BUBBLE_WIDTH
 import character as ui_character
 from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, QTimer, QUrl
-from PySide6.QtGui import QCloseEvent, QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QEnterEvent, QImage, QKeyEvent, QPainter, QTextDocument
+from PySide6.QtGui import QCloseEvent, QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QEnterEvent, QImage, QKeyEvent, QMouseEvent, QPainter, QTextDocument
 from PySide6.QtTest import QTest
 from demo import prepare_demo
 from i18n import set_language, t
@@ -239,21 +240,10 @@ class DesktopTests(unittest.TestCase):
         self.assertLess(shut, .3)
         self.assertGreater(max(rig.step(1 / 30).eye_open for _ in range(8)), .9)
 
-    def test_her_hair_swings_when_she_turns_and_then_settles(self):
-        rig = ui_character.Rig()
-        with patch.object(ui_character.math, "sin", return_value=0.0):
-            for _ in range(5):
-                rig.step(1 / 30, "idle", (.9, 0))
-            self.assertGreater(abs(rig.pose.sway), 1)
-            for _ in range(300):
-                rig.step(1 / 30, "idle", (.9, 0))
-            self.assertLess(abs(rig.pose.sway), .5)
-
     def test_the_rig_cannot_blow_up_at_a_long_frame(self):
         rig = ui_character.Rig()
         for look in ((1, 1), (-1, -1)) * 20:
             pose = rig.step(.2, "excited", look, True)
-            self.assertLessEqual(abs(pose.sway), 20)
             self.assertTrue(all(abs(getattr(pose, field.name)) < 1e4 for field in ui_character.fields(pose)))
 
     def test_her_irises_stay_inside_her_eyes(self):
@@ -273,11 +263,11 @@ class DesktopTests(unittest.TestCase):
 
     def test_every_layer_is_a_real_picture(self):
         puppet = ui_character.Puppet()
-        self.assertGreaterEqual(len(puppet.layers), 11)
+        self.assertGreaterEqual(len(puppet.layers), 28)
         for name, (image, rect) in puppet.layers.items():
             self.assertFalse(image.isNull(), name)
             self.assertTrue(image.hasAlphaChannel(), name)
-        self.assertLess(sum(path.stat().st_size for path in ui_character.ASSETS.iterdir()), 1024 * 1024)
+        self.assertLess(sum(path.stat().st_size for path in ui_character.ASSETS.iterdir()), 2 * 1024 * 1024)
 
     def test_she_stays_icon_sized(self):
         self.assertEqual(ui.SIZES, {"small": 72, "medium": 96, "large": 128})
@@ -285,15 +275,86 @@ class DesktopTests(unittest.TestCase):
         assistant.set_size("medium")
         self.assertLessEqual(assistant.height(), 125)
 
-    def test_hair_bending_is_cached_not_redrawn(self):
+    def drawn(self, puppet, pose, size=192):
+        image = QImage(size, round(size * 1.2), QImage.Format_ARGB32_Premultiplied)
+        image.fill(0)
+        painter = QPainter(image)
+        painter.translate(size / 2, image.height() - 4)
+        puppet.draw(painter, size, pose)
+        painter.end()
+        return image
+
+    def test_turning_her_head_leaves_its_outline_where_it_was(self):
+        puppet = ui_character.Puppet()
+        still = self.drawn(puppet, ui_character.Pose())
+        for turned in (-1.0, 1.0):
+            moved = self.drawn(puppet, ui_character.Pose(angle_x=turned))
+            for y in range(4, 60):  # The top of her hair, where layers used to come apart.
+                for x in range(40, 150, 6):
+                    self.assertLess(abs(still.pixelColor(x, y).alpha() - moved.pixelColor(x, y).alpha()), 200, (x, y))
+
+    def test_everything_on_her_head_moves_with_the_same_turn(self):
+        puppet = ui_character.Puppet()
+        for moved in puppet.moved(QPointF(puppet.head.x() + 1000, puppet.head.y()), 12, 6):
+            self.assertAlmostEqual(moved, 0)
+        middle = puppet.moved(puppet.head, 12, 0)[0]
+        self.assertAlmostEqual(middle, ui_character.TURN)
+
+    def test_a_turn_is_kept_rather_than_warped_again(self):
         puppet = ui_character.Puppet()
         puppet.prepare(96)
-        image = QImage(96, 120, QImage.Format_ARGB32_Premultiplied)
-        painter = QPainter(image)
-        for _ in range(4):
-            puppet.draw(painter, 96, ui_character.Pose(sway=4.0))
-        painter.end()
-        self.assertEqual(len(puppet.bent), 3)
+        puppet.warped("key down", 3, 0)
+        kept = puppet.warped("key down", 3, 0)
+        self.assertIs(kept, puppet.warped("key down", 3, 0))
+        self.assertEqual(len(puppet.warps), 1)
+
+    def test_kept_layers_stay_within_their_limit(self):
+        puppet = ui_character.Puppet()
+        puppet.prepare(96)
+        for turn in range(ui_character.CACHED + 20):
+            puppet.remember(puppet.warps, turn, None)
+        self.assertLessEqual(len(puppet.warps), ui_character.CACHED)
+
+    def test_every_action_is_a_whole_painting(self):
+        puppet = ui_character.Puppet()
+        for mood, key in (("idle", "key down"), ("working", "key hold hug"), ("greeting", "key wave top"), ("stretching", "key stretch top"),
+                          ("napping", "key nap"), ("dangling", "key lifted")):
+            with patch.object(puppet, "put_warped", wraps=puppet.put_warped) as put:
+                self.drawn(puppet, ui_character.replace(ui_character._MOODS[mood], clock=0))
+            self.assertEqual(put.call_args_list[0].args[1], key, mood)
+
+    def test_an_action_passes_through_its_paintings_on_the_way_up(self):
+        puppet, rig = ui_character.Puppet(), ui_character.Rig()
+        keys = []
+        for _ in range(60):
+            key = puppet.key(rig.step(1 / 30, "working"))
+            if not keys or keys[-1] != key:
+                keys.append(key)
+        self.assertEqual(keys, ["key down", "key hold low", "key hold hug"])
+
+    def test_held_up_mid_action_she_lets_go_of_it(self):
+        puppet = ui_character.Puppet()
+        self.assertEqual(puppet.key(ui_character.Pose(lifted=1, hold=1, book=1)), "key lifted")
+
+    def test_at_the_sip_the_cup_covers_her_mouth(self):
+        puppet = ui_character.Puppet()
+        pose = ui_character.Pose(cup=1, clock=math.pi / 2 / .95)
+        self.assertEqual(puppet.key(pose), "key tea sip")
+        with patch.object(puppet, "mouth_") as mouth:
+            self.drawn(puppet, pose)
+        mouth.assert_not_called()
+
+    def test_every_painting_the_rig_can_ask_for_exists(self):
+        puppet = ui_character.Puppet()
+        keys = {name for name in puppet.layers if name.startswith("key ")}
+        asked = set()
+        for field in ui_character.ARMS + ("lifted", "nap"):
+            for amount in (.1, .3, .5, .8, 1):
+                for clock in (0, .4, .8, 1.2, 2, 2.6, 3.4):
+                    pose = ui_character.replace(ui_character.Pose(clock=clock), **{field: amount})
+                    asked.add(puppet.key(pose))
+                    asked.add(puppet.key(ui_character.replace(pose, swing=10.0)))
+        self.assertEqual(asked, keys)
 
     def test_the_whole_window_catches_a_drop(self):
         # Fully clear pixels let a drop fall through to the desktop.
@@ -700,7 +761,7 @@ class DesktopTests(unittest.TestCase):
         assistant.frame = 13
         self.assertEqual(assistant.pose(), (0.0, 1.0, 0.0))
         looking = [assistant.rig.step(1 / 30, "excited", (1, 1), True) for _ in range(5)][-1]
-        self.assertEqual((looking.eye_x, looking.breath, looking.sway), (0, 0, 0))
+        self.assertEqual((looking.eye_x, looking.breath, looking.swing), (0, 0, 0))
         self.assertEqual(assistant.gaze(), (0.0, 0.0))
         assistant.reduced_motion = False
         self.assertNotEqual(assistant.pose(), (0.0, 1.0, 0.0))
@@ -920,6 +981,226 @@ class DesktopTests(unittest.TestCase):
             self.drop_on(self.assistant(), source / "scan.png")
             self.wait_until(lambda: not self.window.sorting)
         self.assertEqual([row["name"] for row in self.window.core.collections()], ["发票"])
+
+    def linkable(self, *names):
+        source = self.use_library({name: f"text of {name}" for name in names})
+        self.window.core.scan_all()
+        self.window.refresh()
+        rows = {row["name"]: row["id"] for row in self.window.core.search("", limit=50)}
+        return source, [rows[name] for name in names]
+
+    def forget_moving(self):
+        """Saved settings outlive the window, and the next test must not start out moving files."""
+        self.window.config.pop("drop_action", None)
+        self.window.config.pop("library_folder", None)
+        self.window.save_config()
+
+    def moving_to_library(self):
+        self.addCleanup(self.forget_moving)
+        self.window.config["drop_action"] = "move"
+        self.window.config["library_folder"] = str(Path(self.scratch) / "library")
+
+    def test_dropped_files_keep_a_copy_unless_moving_was_chosen(self):
+        source = self.use_library({"kept.txt": "a quote for the roof"})
+        loose = Path(self.scratch) / "desk" / "loose.txt"
+        loose.parent.mkdir()
+        loose.write_text("增值税发票", encoding="utf-8")
+        with patch.object(self.window, "start_reading"):
+            self.drop_on(self.assistant(), loose)
+            self.wait_until(lambda: not self.window.sorting)
+        self.assertTrue(loose.is_file())
+        self.assertTrue(Path(self.window.core.files_at([loose])[0]["archive_path"]).is_file())
+
+    def test_moving_sorts_the_file_into_a_subject_folder_and_it_can_go_back(self):
+        self.use_library({"kept.txt": "words"})
+        self.moving_to_library()
+        loose = Path(self.scratch) / "desk" / "loose.txt"
+        loose.parent.mkdir()
+        loose.write_text("增值税发票 发票号码", encoding="utf-8")
+        with patch.object(self.window, "start_reading"):
+            self.drop_on(self.assistant(), loose)
+            self.wait_until(lambda: not self.window.sorting)
+        self.assertFalse(loose.exists())
+        moved = Path(self.scratch) / "library" / "发票" / "loose.txt"
+        self.assertTrue(moved.is_file())
+        row = self.window.core.files_at([moved])[0]
+        self.window.select_file(row["id"])
+        self.assertFalse(self.window.put_back_button.isHidden())
+        self.window.put_back()
+        self.assertTrue(loose.is_file())
+        self.assertFalse(moved.exists())
+        self.assertTrue(self.window.put_back_button.isHidden())
+
+    def test_a_dropped_folder_keeps_its_shape_when_moved(self):
+        self.use_library({"kept.txt": "words"})
+        self.moving_to_library()
+        folder = Path(self.scratch) / "desk" / "project"
+        (folder / "inner").mkdir(parents=True)
+        (folder / "inner" / "plan.txt").write_text("plan", encoding="utf-8")
+        with patch.object(self.window, "start_reading"):
+            self.drop_on(self.assistant(), folder)
+            self.wait_until(lambda: not self.window.sorting)
+        self.assertTrue((Path(self.scratch) / "library" / "project" / "inner" / "plan.txt").is_file())
+        self.assertFalse(folder.exists())
+
+    def test_the_setting_chooses_copy_or_move_and_says_what_will_happen(self):
+        self.addCleanup(self.forget_moving)
+        holder = ui.QWidget()
+        self.addCleanup(holder.deleteLater)
+        self.window.add_drop_settings(ui.QVBoxLayout(holder))
+        choice = holder.findChild(ui.QComboBox)
+        self.assertEqual(choice.currentData(), "copy")
+        choice.setCurrentIndex(choice.findData("move"))
+        self.assertEqual(self.window.config["drop_action"], "move")
+        words = " ".join(item.text() for item in holder.findChildren(ui.QLabel))
+        self.assertIn(str(self.window.library_folder()), words)
+        self.assertNotIn("<", words)  # Labels here show plain text, so markup would appear as it is.
+
+    def test_the_map_shows_linked_files_and_a_drag_ties_them(self):
+        _, (one, two, three) = self.linkable("one.txt", "two.txt", "three.txt")
+        self.window.select_place("links")
+        self.assertIs(self.window.pages.currentWidget(), self.window.links_page)
+        self.assertIs(self.window.map_pages.currentIndex(), 1)
+        self.window.tie([one, two])
+        self.assertEqual(self.window.map_pages.currentIndex(), 0)
+        self.assertEqual(set(self.window.map.nodes), {one, two})
+        self.window.map.tied.emit(two, three) if three in self.window.map.nodes else self.window.tie([two, three])
+        self.assertEqual(len(self.window.core.bundle(one)), 3)
+        self.window.select_file(three)
+        self.assertEqual(self.window.map.focused, three)
+        self.assertEqual(self.window.map.members, {one, two, three})
+
+    def test_typing_a_search_leaves_the_map_for_the_results(self):
+        self.linkable("one.txt", "two.txt")
+        self.window.select_place("links")
+        self.window.search.setText("one")
+        self.window.refresh_results()
+        self.assertEqual(self.window.place, "all")
+        self.assertFalse(self.window.filter_row.isHidden())
+
+    def test_details_list_linked_files_and_offer_the_whole_set(self):
+        _, (one, two, three) = self.linkable("one.txt", "two.txt", "three.txt")
+        self.window.tie([one, two])
+        self.window.tie([two, three])
+        self.window.select_file(one)
+        self.assertTrue(self.window.linked.count() >= 3)
+        self.assertTrue(self.window.copy_rows(self.window.core.bundle(one)))
+        self.assertEqual(len(self.app.clipboard().mimeData().urls()), 3)
+
+    def test_several_files_can_be_picked_and_linked_at_once(self):
+        _, ids = self.linkable("one.txt", "two.txt", "three.txt")
+        self.window.set_view("list")
+        self.window.list.selectAll()
+        self.assertEqual(len(self.window.selected_rows()), 3)
+        rows = self.window.selected_rows()
+        self.assertEqual(self.window.many_menu(rows).actions()[0].text(), t("Link these {files}", files=ui.file_count(3)))
+        self.window.link_selection()
+        self.assertEqual(len(self.window.core.bundle(ids[0])), 3)
+
+    def test_the_picker_keeps_ticks_across_searches_and_leaves_out_what_is_linked(self):
+        _, (one, two, three, four) = self.linkable("one.txt", "two.txt", "three.txt", "four.txt")
+        self.window.tie([one, two])
+        picker = ui.LinkPicker(self.window, one)
+        self.addCleanup(picker.deleteLater)
+        self.assertFalse(any("<" in item.text() for item in picker.findChildren(ui.QLabel)))
+        names = lambda: [picker.results.item(index).data(ui.Qt.UserRole)[1] for index in range(picker.results.count())]
+        self.assertNotIn("two.txt", names())
+        picker.box.setText("three")
+        picker.clicked(picker.results.item(0))
+        picker.box.setText("four")
+        picker.tick_first()
+        picker.box.setText("")
+        self.assertEqual(picker.ids(), [one, three, four])
+        self.assertTrue(picker.confirm.isEnabled())
+
+    def board(self, *names):
+        _, ids = self.linkable(*names)
+        self.window.tie(ids)
+        self.window.select_place("links")
+        board = self.window.map
+        board.resize(1200, 800)
+        board.lay_out()
+        board.fit()
+        return board, ids
+
+    def spot_of(self, board, file_id):
+        return board.nodes[file_id].rect.center() * board.zoom + board.pan
+
+    def mouse(self, board, kind, spot, button=ui.Qt.LeftButton):
+        handler = {QEvent.MouseButtonPress: board.mousePressEvent, QEvent.MouseMove: board.mouseMoveEvent, QEvent.MouseButtonRelease: board.mouseReleaseEvent}[kind]
+        handler(QMouseEvent(kind, spot, spot, button, button if kind != QEvent.MouseButtonRelease else ui.Qt.NoButton, ui.Qt.NoModifier))
+
+    def test_every_card_on_the_board_has_its_own_place(self):
+        board, ids = self.board("one.txt", "two.txt", "three.txt", "four.txt")
+        rects = [board.nodes[file_id].rect for file_id in ids]
+        for index, rect in enumerate(rects):
+            self.assertFalse(any(rect.intersects(other) for other in rects[index + 1:]))
+            self.assertTrue(board.frames[0].rect.contains(rect))
+
+    def test_a_click_shows_the_set_a_card_belongs_to(self):
+        board, ids = self.board("one.txt", "two.txt", "three.txt")
+        spot = self.spot_of(board, ids[1])
+        self.mouse(board, QEvent.MouseButtonPress, spot)
+        self.mouse(board, QEvent.MouseButtonRelease, spot)
+        self.assertEqual(self.window.selected_id, ids[1])
+        self.assertEqual(board.focused, ids[1])
+        self.assertEqual(board.members, set(ids))
+
+    def test_dropping_a_card_on_another_links_them_and_it_goes_back_to_its_place(self):
+        _, (one, two, three, four) = self.linkable("one.txt", "two.txt", "three.txt", "four.txt")
+        self.window.tie([one, two])
+        self.window.tie([three, four])
+        self.window.select_place("links")
+        board = self.window.map
+        board.resize(1200, 800)
+        board.lay_out()
+        board.fit()
+        before = board.nodes[one].rect
+        self.mouse(board, QEvent.MouseButtonPress, self.spot_of(board, one))
+        self.mouse(board, QEvent.MouseMove, self.spot_of(board, three))
+        self.assertEqual(board.target, three)
+        self.mouse(board, QEvent.MouseButtonRelease, self.spot_of(board, three))
+        self.assertEqual(len(self.window.core.bundle(one)), 4)
+        self.assertEqual(len(self.window.map.frames), 1)
+        self.assertIsNone(board.dragging)
+
+    def test_a_card_dropped_nowhere_changes_nothing(self):
+        board, ids = self.board("one.txt", "two.txt")
+        self.mouse(board, QEvent.MouseButtonPress, self.spot_of(board, ids[0]))
+        self.mouse(board, QEvent.MouseMove, QPointF(5, 5))
+        self.mouse(board, QEvent.MouseButtonRelease, QPointF(5, 5))
+        self.assertEqual(self.window.core.link_graph()["edges"], [(min(ids), max(ids))])
+
+    def test_a_suggestion_links_with_one_click(self):
+        source = self.use_library({"plan2026.docx": "a", "plan2026.pdf": "b", "other.txt": "c"})
+        self.window.core.scan_all()
+        rows = {row["name"]: row["id"] for row in self.window.core.search("", limit=9)}
+        self.window.refresh()
+        self.window.tie([rows["plan2026.docx"], rows["other.txt"]])
+        self.window.select_place("links")
+        board = self.window.map
+        board.resize(1200, 800)
+        board.lay_out()
+        board.fit()
+        self.window.select_file(rows["plan2026.docx"])
+        self.assertEqual([offer["name"] for offer in board.offers], ["plan2026.pdf"])
+        self.assertEqual(board.offers[0]["why_text"], t("Same name"))
+        spot = board.offer_rects()[0][1].center()
+        self.mouse(board, QEvent.MouseButtonPress, spot)
+        self.mouse(board, QEvent.MouseButtonRelease, spot)
+        self.assertEqual(len(self.window.core.bundle(rows["plan2026.pdf"])), 3)
+
+    def test_a_board_at_rest_needs_no_timer(self):
+        board, _ = self.board("one.txt", "two.txt")
+        board.focus(None)
+        self.assertFalse(board.timer.isActive())
+
+    def test_a_map_with_no_ties_needs_no_timer(self):
+        _, (one, two) = self.linkable("one.txt", "two.txt")
+        self.window.tie([one, two])
+        self.window.select_place("links")
+        self.window.map.focus(None)
+        self.assertFalse(self.window.map.timer.isActive())
 
     def test_turning_off_connected_tools_also_turns_off_changes(self):
         holder = ui.QWidget()
@@ -1284,7 +1565,7 @@ class DesktopTests(unittest.TestCase):
         menu = self.window.file_menu(row["id"])
         self.assertEqual(self.window.selected_id, row["id"])
         self.assertEqual([action.text() for action in menu.actions() if action.text()],
-                         [t("Open"), t("Copy file"), t("Show in folder"), t("Copy path"), t("Favorite") if not row.get("favorite") else t("Favorited"), t("Tags"), t("Add to collection")])
+                         [t("Open"), t("Copy file"), t("Show in folder"), t("Copy path"), t("Favorite") if not row.get("favorite") else t("Favorited"), t("Tags"), t("Add to collection"), t("Link a file")])
         with patch.object(self.window, "open_file") as opened:
             menu.actions()[0].trigger()
         opened.assert_called_once_with(row["id"])

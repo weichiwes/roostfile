@@ -37,6 +37,166 @@ class ArchiveCoreTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
+    def filed(self, *names):
+        for name in names:
+            self.write(name, f"text of {name}")
+        self.core.add_source(self.source)
+        self.core.scan_all()
+        rows = {Path(row["relative_path"]).as_posix(): row["id"] for row in self.core.search("", limit=50)}
+        return [rows[name] for name in names]
+
+    def test_links_form_a_bundle_and_survive_a_rescan(self):
+        report, chart, budget, other = self.filed("report.docx", "chart.png", "budget.xlsx", "other.txt")
+        self.assertEqual(self.core.link([report, chart, budget]), 2)
+        self.assertEqual(self.core.link([chart, report]), 0)  # Already tied.
+        self.core.scan_all()
+        self.assertEqual({row["id"] for row in self.core.bundle(chart)}, {report, chart, budget})
+        self.assertEqual({row["id"] for row in self.core.links_of(report)}, {chart, budget})
+        self.assertEqual(self.core.bundle(other)[0]["id"], other)
+        self.assertEqual(self.core.linked_counts([report, chart, other]), {report: 2, chart: 1})
+        graph = self.core.link_graph()
+        self.assertEqual(len(graph["nodes"]), 3)
+        self.assertEqual(len(graph["edges"]), 2)
+        self.core.unlink(report, budget)
+        self.assertEqual({row["id"] for row in self.core.bundle(report)}, {report, chart})
+        self.core.unlink_all(report)
+        self.assertEqual(self.core.link_graph()["edges"], [])
+
+    def test_a_long_chain_of_links_is_still_one_bundle(self):
+        ids = self.filed(*(f"part{number}.txt" for number in range(6)))
+        for one, other in zip(ids, ids[1:]):
+            self.core.link([one, other])
+        self.assertEqual(len(self.core.bundle(ids[0])), 6)
+
+    def test_links_follow_a_renamed_file(self):
+        keep, name = self.filed("keep.txt", "name.txt")
+        self.core.link([keep, name])
+        (self.source / "name.txt").rename(self.source / "renamed.txt")
+        self.core.scan_all()
+        names = {row["name"] for row in self.core.bundle(keep)}
+        self.assertEqual(names, {"keep.txt", "renamed.txt"})
+
+    def test_a_removed_source_takes_its_links_with_it(self):
+        one, two = self.filed("one.txt", "two.txt")
+        self.core.link([one, two])
+        self.core.remove_source(self.core.sources()[0]["id"])
+        self.assertEqual(self.core.link_graph()["edges"], [])
+
+    def test_suggestions_explain_themselves_and_skip_what_is_tied(self):
+        offer, same, tied = self.filed("plan2026.docx", "plan2026.pdf", "tied.txt")
+        self.write("note.txt", "see plan2026 for details")
+        self.core.scan_all()
+        self.core.link([offer, tied])
+        offers = {row["name"]: row["why"] for row in self.core.suggest_links(offer)}
+        self.assertEqual(offers["plan2026.pdf"], "Same name")
+        self.assertEqual(offers["note.txt"], "Mentions this file")
+        self.assertNotIn("tied.txt", offers)
+        self.assertEqual(self.core.suggest_links(999999), [])
+
+    def test_moving_keeps_everything_known_and_can_be_undone(self):
+        invoice, other = self.filed("sub/invoice.txt", "other.txt")
+        library = self.base / "library"
+        self.core.link([invoice, other])
+        self.core.set_tags(invoice, ["paid"])
+        original = self.core.get_file(invoice)["path"]
+        result = self.core.move_files([(invoice, "Invoices/invoice.txt")], library)
+        self.assertEqual(result, {"moved": [invoice], "problems": []})
+        self.assertFalse(Path(original).exists())
+        row = self.core.get_file(invoice)
+        self.assertEqual(Path(row["path"]), library / "Invoices" / "invoice.txt")
+        self.assertEqual(row["tags"], ["paid"])
+        self.assertEqual(row["text"], "text of sub/invoice.txt")
+        self.assertEqual(self.core.moved_from(invoice), original)
+        self.assertEqual(len(self.core.bundle(invoice)), 2)
+        self.core.scan_all()
+        self.assertEqual(self.core.get_file(invoice)["missing"], 0)
+        self.assertEqual(self.core.search("invoice", limit=5)[0]["id"], invoice)
+        self.core.move_back(invoice)
+        self.assertTrue(Path(original).is_file())
+        self.assertFalse((library / "Invoices" / "invoice.txt").exists())
+        self.assertEqual(self.core.moved_from(invoice), "")
+        self.core.scan_all()
+        self.assertEqual(self.core.get_file(invoice)["missing"], 0)
+
+    def test_moving_never_replaces_a_file_already_there(self):
+        first, second = self.filed("a/same.txt", "b/same.txt")
+        library = self.base / "library"
+        library.mkdir()
+        (library / "same.txt").write_text("already here", encoding="utf-8")
+        self.core.move_files([(first, "same.txt"), (second, "same.txt")], library)
+        self.assertEqual((library / "same.txt").read_text(encoding="utf-8"), "already here")
+        self.assertEqual({path.name for path in library.iterdir()}, {"same.txt", "same (2).txt", "same (3).txt"})
+
+    def test_a_handed_over_file_can_move_and_its_empty_source_goes(self):
+        loose = self.base / "desktop" / "loose.txt"
+        loose.parent.mkdir()
+        loose.write_text("handed over", encoding="utf-8")
+        self.core.scan_all(only=self.core.adopt([loose]))
+        row = self.core.files_at([loose])[0]
+        self.core.move_files([(row["id"], "loose.txt")], self.base / "library")
+        self.assertEqual([Path(item["path"]).name for item in self.core.sources()], ["library"])
+        self.assertTrue(self.core.get_file(row["id"])["path"].endswith("loose.txt"))
+        self.core.move_back(row["id"])
+        self.assertTrue(loose.is_file())
+        self.core.scan_all()
+        self.assertEqual(self.core.get_file(row["id"])["missing"], 0)
+
+    def test_a_copy_across_disks_is_compared_before_the_original_goes(self):
+        origin, target = self.base / "origin.txt", self.base / "there" / "origin.txt"
+        origin.write_text("precious", encoding="utf-8")
+        real = os.rename
+        def other_disk(one, other):
+            if Path(one) == origin:
+                raise OSError(core_module.errno.EXDEV, "Cross-device link")
+            real(one, other)
+        with patch.object(core_module.os, "rename", other_disk), patch.object(core_module, "_same_bytes", lambda one, other: False):
+            with self.assertRaises(OSError):
+                core_module._carry_file(origin, target)
+        self.assertTrue(origin.is_file())
+        self.assertFalse(target.exists())
+        self.assertEqual(list(target.parent.iterdir()), [])
+        with patch.object(core_module.os, "rename", other_disk):
+            core_module._carry_file(origin, target)
+        self.assertFalse(origin.exists())
+        self.assertEqual(target.read_text(encoding="utf-8"), "precious")
+
+    def test_a_failed_move_leaves_the_file_alone_and_the_rest_go(self):
+        stuck, fine = self.filed("stuck.txt", "fine.txt")
+        real = core_module._carry_file
+        def locked(origin, target):
+            if origin.name == "stuck.txt":
+                raise PermissionError("in use")
+            real(origin, target)
+        with patch.object(core_module, "_carry_file", locked):
+            result = self.core.move_files([(stuck, "stuck.txt"), (fine, "fine.txt")], self.base / "library")
+        self.assertEqual(result["moved"], [fine])
+        self.assertEqual(result["problems"][0][0], "stuck.txt")
+        self.assertTrue((self.source / "stuck.txt").is_file())
+        self.assertEqual(self.core.moved_from(stuck), "")
+
+    def test_a_file_goes_home_if_the_catalogue_cannot_follow(self):
+        one = self.filed("one.txt")[0]
+        origin = Path(self.core.get_file(one)["path"])
+        with patch.object(self.core, "_repoint", side_effect=RuntimeError("disk full")):
+            result = self.core.move_files([(one, "one.txt")], self.base / "library")
+        self.assertEqual(result["moved"], [])
+        self.assertTrue(origin.is_file())
+        self.assertFalse((self.base / "library" / "one.txt").exists())
+        self.assertEqual(self.core.moved_from(one), "")
+
+    def test_the_library_cannot_be_inside_the_data_folder(self):
+        one = self.filed("one.txt")[0]
+        with self.assertRaises(ValueError):
+            self.core.move_files([(one, "one.txt")], self.core.data_dir / "library")
+
+    def test_a_picked_file_can_keep_a_saved_copy(self):
+        loose = self.base / "desktop" / "kept.txt"
+        loose.parent.mkdir()
+        loose.write_text("keep me", encoding="utf-8")
+        self.core.scan_all(only=self.core.adopt([loose], "copy"))
+        row = self.core.files_at([loose])[0]
+        self.assertTrue(Path(row["archive_path"]).is_file())
+
     def test_chinese_fulltext_multi_keyword_and_persistence(self):
         self.write("会议纪要.txt", "星河项目 预算审批 合同归档")
         self.write("其他.md", "星河项目 不含另一关键词")
@@ -994,7 +1154,7 @@ nas:/export on /Volumes/my files (nfs, nodev)
         self.assertIn("app/.vendor/PySide6/a.pyd", names)
         self.assertIn("app/character.py", names)
         self.assertIn("app/assets/roo/layers.json", names)
-        self.assertIn("app/assets/roo/front-hair.png", names)
+        self.assertIn("app/assets/roo/key-down.png", names)
         self.assertFalse([name for name in names if "/bin/" in name or "/data/" in name or name.endswith((".sqlite3", "ui-state.json"))])
 
     def names(self):

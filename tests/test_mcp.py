@@ -124,6 +124,17 @@ class ToolTests(Base):
         self.assertEqual(self.call("list_collection_files", collection="家")[0]["files"][0]["id"], entry["id"])
         self.assertEqual(Path(entry["path"]).read_bytes(), before)
 
+    def test_linked_files_can_be_read_and_linking_needs_permission(self):
+        self.allow(mcp=True)
+        ids = [row["id"] for row in self.call("search_files", query="", limit=3)[0]["files"]]
+        self.assertEqual(self.call("list_linked_files", file_id=ids[0])[0], {"files": []})
+        self.assertEqual(self.call("link_files", file_ids=ids[:2]), (NOT_ALLOWED, True))
+        self.allow(mcp=True, mcp_write=True)
+        self.assertEqual(self.call("link_files", file_ids=ids[:2])[0], {"linked": 1})
+        self.assertEqual([row["id"] for row in self.call("list_linked_files", file_id=ids[0])[0]["files"]], [ids[1]])
+        self.assertTrue(self.call("link_files", file_ids=[ids[0], ids[0]])[1])
+        self.assertTrue(self.call("list_linked_files", file_id=99999)[1])
+
     def test_mistakes_come_back_as_messages_a_tool_can_act_on(self):
         for name, arguments in (("no_such_tool", {}), ("search_files", {}), ("search_files", {"query": "x", "limit": "many"}),
                                 ("search_files", {"query": "x", "extra": 1}), ("list_collection_files", {"collection": "没有"}),
@@ -161,11 +172,11 @@ class ProtocolTests(Base):
 
     def test_every_tool_says_how_to_call_it(self):
         tools = self.exchange({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})[0]["result"]["tools"]
-        self.assertEqual(len(tools), 5)
+        self.assertEqual(len(tools), 7)
         for tool in tools:
             self.assertEqual(tool["inputSchema"]["type"], "object")
             self.assertTrue(tool["description"])
-        self.assertEqual([tool["name"] for tool in tools if not tool["annotations"]["readOnlyHint"]], ["add_to_collection"])
+        self.assertEqual([tool["name"] for tool in tools if not tool["annotations"]["readOnlyHint"]], ["link_files", "add_to_collection"])
 
     def test_it_runs_with_only_the_standard_library(self):
         # -I keeps out site-packages' paths from the environment, as the embedded runtime does.

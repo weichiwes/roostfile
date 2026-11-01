@@ -1,61 +1,210 @@
 {
- "width": 451,
- "height": 502,
- "layers": {
-  "back hair": {
-   "file": "back-hair.png",
-   "x": -1.3,
-   "y": 37.4
-  },
-  "body": {
-   "file": "body.png",
-   "x": 97.9,
-   "y": 265.0
-  },
-  "handwear": {
-   "file": "handwear.png",
-   "x": 113.8,
-   "y": 375.1
-  },
-  "ears": {
-   "file": "ears.png",
-   "x": 311.6,
-   "y": 186.9
-  },
-  "face": {
-   "file": "face.png",
-   "x": 111.7,
-   "y": 65.1
-  },
-  "eyewhite": {
-   "file": "eyewhite.png",
-   "x": 132.3,
-   "y": 168.0
-  },
-  "irides": {
-   "file": "irides.png",
-   "x": 145.7,
-   "y": 176.4
-  },
-  "eyelash": {
-   "file": "eyelash.png",
-   "x": 126.0,
-   "y": 158.8
-  },
-  "mouth": {
-   "file": "mouth.png",
-   "x": 202.0,
-   "y": 231.0
-  },
-  "front hair": {
-   "file": "front-hair.png",
-   "x": 60.1,
-   "y": 40.7
-  },
-  "headwear": {
-   "file": "headwear.png",
-   "x": 297.8,
-   "y": -1.3
-  }
- }
+"width": 451,
+"height": 502,
+"collar": [
+217.6,
+295.8
+],
+"face": [
+111.7,
+65.1,
+222,
+219
+],
+"pivot": [
+222.7,
+278.1
+],
+"head": [
+204.6,
+162.4
+],
+"layers": {
+"eyewhite": {
+"file": "eyewhite.png",
+"x": 132.3,
+"y": 168.0
+},
+"irides": {
+"file": "irides.png",
+"x": 145.7,
+"y": 176.4
+},
+"eyelash": {
+"file": "eyelash.png",
+"x": 126.0,
+"y": 158.8
+},
+"mouth": {
+"file": "mouth.png",
+"x": 202.0,
+"y": 231.0
+},
+"prop ball": {
+"file": "prop-ball.png",
+"x": 0,
+"y": 0
+},
+"key ball down": {
+"file": "key-ball-down.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key ball up": {
+"file": "key-ball-up.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key down": {
+"file": "key-down.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key hold hug": {
+"file": "key-hold-hug.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key hold low": {
+"file": "key-hold-low.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key lifted swing": {
+"file": "key-lifted-swing.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key lifted": {
+"file": "key-lifted.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key nap": {
+"file": "key-nap.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key read low": {
+"file": "key-read-low.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key read turn": {
+"file": "key-read-turn.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key read up": {
+"file": "key-read-up.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key stretch mid": {
+"file": "key-stretch-mid.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key stretch top": {
+"file": "key-stretch-top.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key tea hold": {
+"file": "key-tea-hold.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key tea low": {
+"file": "key-tea-low.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key tea sip": {
+"file": "key-tea-sip.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key wave high": {
+"file": "key-wave-high.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key wave low": {
+"file": "key-wave-low.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key wave side": {
+"file": "key-wave-side.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key wave top": {
+"file": "key-wave-top.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key write a": {
+"file": "key-write-a.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key write b": {
+"file": "key-write-b.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+},
+"key write low": {
+"file": "key-write-low.png",
+"x": -54.9,
+"y": -12.3,
+"width": 537,
+"height": 537
+}
+}
 }

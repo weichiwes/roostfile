@@ -17,6 +17,6 @@ Text recognition is part of Windows and is not distributed with Roostfile.
 
 ## Artwork
 
-The pictures in `assets/roo` were made for this project and are under the same MIT License. The illustration was generated with [Animagine XL 4.0](https://huggingface.co/cagliostrolab/animagine-xl-4.0) (CreativeML Open RAIL++-M), and split into layers with [See-through](https://github.com/shitagaki-lab/see-through) (Apache-2.0). Neither tool nor its model weights are included here, only the resulting pictures.
+The pictures in `assets/roo` were made for this project and are under the same MIT License. The illustrations were generated with [Animagine XL 4.0](https://huggingface.co/cagliostrolab/animagine-xl-4.0) (CreativeML Open RAIL++-M), and her eyes and mouth were split into layers with [See-through](https://github.com/shitagaki-lab/see-through) (Apache-2.0). Neither tool nor its model weights are included here, only the resulting pictures.
 
 Roo is not a Live2D model. Roostfile contains no Live2D files or software.

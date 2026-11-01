@@ -7,7 +7,7 @@ A private file archive for your own computer. Add the folders you choose, then f
 ![The deck view](previews/windows/en-deck.png)
 
 - **Runs only on your computer.** No account, no telemetry, no update check, and it never connects to the internet.
-- **Never touches your originals.** Files are not moved, renamed or deleted, and nothing is uploaded.
+- **Leaves your originals alone unless you say otherwise.** By default nothing is moved, renamed or deleted. You can choose to have dropped files moved into a library instead, and put any of them back. Nothing is uploaded.
 - **Finds what you half remember.** Search names, document text and words in photos and scans, in English and Chinese.
 
 > **Status: early prototype.** There is no installer yet. Tested on Windows 11 with Python 3.12. macOS support is written but has not been run on a Mac yet.
@@ -16,10 +16,11 @@ A private file archive for your own computer. Add the folders you choose, then f
 
 ![Quick search](previews/windows/en-quick.png)
 
-- **Hand files to Roo.** A tiny chibi assistant stands on your desktop. Drop files or a folder on her and she reads them, hugging a folder as she works, then files each one in a collection named for its subject, such as Contract or Invoice. Nothing is moved. Click her to search, drag her anywhere, or replace her with your own picture.
+- **Hand files to Roo.** A tiny chibi assistant stands on your desktop. Drop files or a folder on her and she reads them, hugging a folder as she works, then files each one in a collection named for its subject, such as Contract or Invoice. By default she keeps a copy and leaves the original where it is. Settings can have her move files into your library instead, sorted into a folder for each subject. Click her to search, drag her anywhere, or replace her with your own picture.
 - **Connect your own tools.** An MCP server lets assistants and workflows search and read your archive, once you allow it in Settings.
-- **Index in place or keep a copy.** Choose per folder, and switch at any time. Original files are never moved, renamed or deleted.
+- **Index in place or keep a copy.** Choose per folder, and switch at any time. Folders you add are never moved, renamed or deleted.
 - **See what just arrived.** When a new file lands, a small bar appears at the top of the screen with Copy and Open. It never takes the keyboard, and it stays away during games and presentations.
+- **Link files that belong together.** A quote, its contract and the photos from site can live in different folders. Link them once and they sit together as a set on the Links board, each shown as a card with its cover. Finding one shows the rest, and you can copy the whole set at once. Press `Ctrl L` on a selection, or drag one card onto another. Roostfile also suggests files that may belong, and says why.
 - **Gather files into collections.** Group files from anywhere for a task, such as a tax return, without moving them. Search, then add all the results at once. A collection follows its files when they are renamed, and exports to a CSV list.
 - **Search from anywhere.** Press `Ctrl Alt K` in any app and a small search bar appears. Type a clue, press `Ctrl C`, and you are back where you were, ready to paste the file.
 - **Search names, text and tags.** Multiple words narrow the results. Chinese and English both work, including two-character Chinese terms and parts of words.
@@ -36,9 +37,9 @@ A private file archive for your own computer. Add the folders you choose, then f
 
 ## Make Roo your own
 
-![Roo at rest, waving, reading, doing homework, being carried and happy](previews/roo.png)
+![Roo standing, facing you](previews/roo.png)
 
-She waves when she arrives. Her eyes follow your pointer, she blinks, breathes and talks, and her hair swings as she moves. Pick her up and she dangles from the back of her collar, swinging behind the hand that holds her. Leave her alone and she reads, does her homework, bounces a ball, sips tea or dozes off where she stands. That is a timer: she watches nothing you do. Her right-click menu can stop her playing or pin her in place. She is a layered illustration moved by a small rig written for this app, in the manner of Live2D. She is not a Live2D model and uses none of its software.
+She waves when she arrives. Her eyes follow your pointer, she blinks, breathes and talks. Pick her up by the collar and your pointer becomes the hand: her cardigan rides up, her legs dangle, and she swings as you move. Leave her alone and she reads, does her homework, bounces a ball, sips tea or dozes off where she stands. That is a timer: she watches nothing you do. Her right-click menu can stop her playing or pin her in place. She is a layered illustration moved by a small rig written for this app, in the manner of Live2D. She is not a Live2D model and uses none of its software.
 
 Right-click Roo and choose **Change image**. PNG, JPG, WebP, BMP and GIF up to 20 MB work, and a GIF plays. Any picture bobs, squashes and hops, and the copy is kept in your archive, so the original can move.
 
@@ -68,6 +69,8 @@ Roostfile includes a server for the [Model Context Protocol](https://modelcontex
 | `list_collections` | Lists your collections |
 | `list_collection_files` | Lists the files in a collection |
 | `add_to_collection` | Adds files to a collection. Needs **Also let them add files to collections** |
+| `list_linked_files` | Lists the files linked to one file |
+| `link_files` | Links files together. Needs the same switch as `add_to_collection` |
 
 It runs over stdin and stdout, opens no network connection, and reaches only what is already in your archive. Both switches are read on every request, so turning one off works at once, even mid-session. No tool moves, changes or deletes a file.
 
@@ -156,7 +159,8 @@ Search uses keywords. There is no semantic model, and nothing recognises what a 
 | --- | --- |
 | `desktop_app.py` | Main window, filters, preview, sources, settings |
 | `assistant.py` | Roo's window: moods, chosen pictures and taking drops |
-| `character.py` | Roo's rig: the layers in `assets/roo` and what moves them |
+| `character.py` | Roo's rig: one painting per pose in `assets/roo`, with a living face on top |
+| `link_board.py` | The Links board: sets of linked files as cards |
 | `mcp_server.py` | MCP server for connected tools. Standard library only, and no Qt |
 | `visual_widgets.py` | Deck, hover behaviour and file covers |
 | `background.py` | Everything that differs by system: global shortcut, one running copy, starting at sign-in, change notices |

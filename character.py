@@ -1,9 +1,10 @@
-"""Roo, the assistant: a chibi illustration moved as layers, in the manner of Live2D.
+"""Roo, the assistant: one whole painting of her for each pose, with a living face.
 
-This is not a Live2D model and uses none of its runtime. The artwork is a set of
-transparent PNGs, and a few parameters move them: layers shift by their depth to
-turn the head, the irises slide inside the eye whites, and a spring carries the
-hair. Rig moves the parameters and Puppet paints them.
+Nothing of her is cut apart. Each key in assets/roo is a full picture, painted with her
+eyes and mouth left out, and the eyes and mouth go on top so she can blink, look about and
+talk. The whole picture warps for a head turn, breathes, leans, and swings from her collar
+when she is held up. An action is a few keys shown in turn. Rig moves the parameters and
+Puppet paints them. This is not a Live2D model and uses none of its runtime.
 """
 from __future__ import annotations
 
@@ -19,21 +20,22 @@ from PySide6.QtGui import QBitmap, QColor, QPainter, QPainterPath, QPen, QPixmap
 from pages import image_reader
 
 ASSETS = Path(__file__).resolve().parent / "assets" / "roo"
-TURN = 11.0  # How far the head layers travel at a full turn, in artwork pixels.
-NOD = 6.0
-HAIR_STRIPS = 40
-BEND_MARGIN = 16  # Device pixels of room for hair to swing into.
+TURN = 17.0  # How far the middle of her face travels at a full turn, in artwork pixels.
+NOD = 10.0
+TURN_STEPS, NOD_STEPS = 12, 6  # Warped layers are kept, so the angles come in steps too small to see.
+WARP_ROWS, WARP_COLUMNS = 56, 20
+WARP_ROOM = 14  # Artwork pixels around a warped layer, for what moves past its edge.
+HEAD_REACH = (138.0, 125.0)  # The warp fades to nothing here, so the outline of her head stays put.
+CACHED = 180  # Warped layers kept at once.
 LINE = "#33211F"
 MOUTH, TONGUE = "#A8423F", "#F0918C"
 BLUSH = "#F58F86"
 GLINT = ("#F3C569", "#F7A8B8", "#FFFFFF", "#BFE3CC")
-FOLDER, FOLDER_DARK = "#F3C569", "#C98F35"
-SLEEVE, HAND = "#FBF1DC", "#FFE9DD"
-BROW, BROW_Y = "#3C6652", 152
-COVER, BALL = "#4F8A6E", "#E9A94B"
-ARM_LENGTH = 92
 MAX_SWING = 30  # Degrees, however hard she is shaken.
-GRIP_ABOVE = 58  # Artwork pixels from the top of her hair up to the pinch.
+ARM_EASE = 5.0  # Her arms are eased twice, so each painting stays up long enough to read.
+ARMS = ("hold", "wave", "stretch", "book", "write", "ball", "cup")
+BOUNCE = 4.2
+BALL_X, BALL_RISE = 362.0, 66.0  # Artwork pixels: where the ball bounces, and how high.
 
 
 @dataclass
@@ -41,7 +43,6 @@ class Pose:
     """The parameters. Everything drawn comes from these numbers."""
     angle_x: float = 0.0  # Head turn, -1 to 1.
     angle_y: float = 0.0  # Head nod, -1 up to 1 down.
-    tilt: float = 0.0  # Head lean in degrees.
     lean: float = 0.0  # Body lean in degrees.
     breath: float = 0.0
     eye_open: float = 1.0
@@ -61,7 +62,6 @@ class Pose:
     lifted: float = 0.0  # 1 hangs from the back of her collar.
     swing: float = 0.0  # Degrees, swinging from the hand that holds her.
     sparkle: float = 0.0
-    sway: float = 0.0  # Where the hair has swung to, in artwork pixels.
     clock: float = 0.0
 
 
@@ -74,17 +74,19 @@ class Puppet:
         self.layers = {}
         for name, layer in meta["layers"].items():
             image = image_reader(Path(folder) / layer["file"]).read()
-            self.layers[name] = (image, QRectF(layer["x"], layer["y"], image.width(), image.height()))
-        self.scaled, self.bent = {}, {}
+            self.layers[name] = (image, QRectF(layer["x"], layer["y"], layer.get("width", image.width()), layer.get("height", image.height())))
+        self.scaled, self.warps = {}, {}
         self.pixels = 0
         rect = self.rect
-        face, irises, eyes, mouth = rect("face"), rect("irides"), rect("eyewhite"), rect("mouth")
-        self.pivot = QPointF(face.center().x(), face.bottom() - 6)
+        irises, eyes, mouth = rect("irides"), rect("eyewhite"), rect("mouth")
+        self.face = QRectF(*meta["face"])
+        self.pivot = QPointF(*meta["pivot"])
+        self.head = QPointF(*meta["head"])
         self.eye_line = eyes.center().y()
         reach = irises.height() * .46
         self.eyes = (QPointF(irises.left() + reach, irises.center().y()), QPointF(irises.right() - reach, irises.center().y()))
         self.mouth = mouth.center()
-        self.grip = QPointF(self.pivot.x(), rect("front hair").top() - GRIP_ABOVE)
+        self.grip = QPointF(*meta["collar"])  # Where she is held: the pointer pinches her here.
         self.white_outline = QPainterPath()
 
     def rect(self, name):
@@ -96,7 +98,7 @@ class Puppet:
             return
         self.pixels = pixels
         scale = pixels / self.width
-        self.scaled, self.bent = {}, {}
+        self.scaled, self.warps = {}, {}
         for name, (image, rect) in self.layers.items():
             size = (max(1, round(rect.width() * scale)), max(1, round(rect.height() * scale)))
             self.scaled[name] = QPixmap.fromImage(image.scaled(*size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
@@ -110,31 +112,57 @@ class Puppet:
     def put(self, p, name, x=0.0, y=0.0):
         p.drawPixmap(self.rect(name).translated(x, y), self.scaled[name], QRectF(self.scaled[name].rect()))
 
-    def strands(self, p, name, sway, root, x=0.0, y=0.0):
-        """Draws a layer in rows, each pushed further from the root, so it bends like hair.
+    def weight(self, x, y):
+        """How much of a head turn moves this point of the artwork: all of it mid-face, none at her outline."""
+        across = min(1.0, abs(x - self.head.x()) / HEAD_REACH[0])
+        down = min(1.0, abs(y - self.head.y()) / HEAD_REACH[1])
+        return (math.cos(across * math.pi / 2) * math.cos(down * math.pi / 2)) ** 2
 
-        The rows are joined on whole pixels first. Drawn straight onto a scaled
-        painter they would overlap slightly and show as lines across the hair.
-        """
-        key = (name, round(sway * 2))
-        bent = self.bent.get(key)
-        if bent is None:
-            pixmap, scale = self.scaled[name], self.pixels / self.width
-            bent = QPixmap(pixmap.width() + 2 * BEND_MARGIN, pixmap.height())
+    def moved(self, point, turn, nod):
+        """Where a turn and nod carry a point. Everything on her head follows this, so nothing slips."""
+        reach = self.weight(point.x(), point.y())
+        return reach * turn / TURN_STEPS * TURN, reach * nod / NOD_STEPS * NOD
+
+    def warped(self, name, turn, nod):
+        """A layer curved around her head, drawn as stretched pieces, and kept for next time."""
+        pixmap, rect = self.scaled[name], self.rect(name)
+        if not turn and not nod:
+            return pixmap, rect
+        key = (name, turn, nod)
+        kept = self.warps.get(key)
+        if kept is None:
+            scale_x, scale_y = pixmap.width() / rect.width(), pixmap.height() / rect.height()
+            room_x, room_y = round(WARP_ROOM * scale_x), round(WARP_ROOM * scale_y)
+            bent = QPixmap(pixmap.width() + 2 * room_x, pixmap.height() + 2 * room_y)
             bent.fill(Qt.transparent)
             with_rows = QPainter(bent)
             with_rows.setRenderHint(QPainter.SmoothPixmapTransform)
-            rows = min(HAIR_STRIPS, pixmap.height())
+            rows, columns = min(WARP_ROWS, pixmap.height()), min(WARP_COLUMNS, pixmap.width())
+            art_x = lambda x: rect.x() + x / scale_x
+            art_y = lambda y: rect.y() + y / scale_y
+            shifted = lambda y: round(y + self.moved(QPointF(self.head.x(), art_y(y)), turn, nod)[1] * scale_y)
             for row in range(rows):
                 top, bottom = pixmap.height() * row // rows, pixmap.height() * (row + 1) // rows
-                reach = max(0.0, (top / pixmap.height() - root) / (1 - root))
-                shift = max(-BEND_MARGIN, min(BEND_MARGIN, key[1] / 2 * scale * reach * reach))
-                with_rows.drawPixmap(QRectF(BEND_MARGIN + shift, top, pixmap.width(), bottom - top), pixmap, QRectF(0, top, pixmap.width(), bottom - top))
+                line = (top + bottom) / 2
+                knots = [pixmap.width() * column // columns for column in range(columns + 1)]
+                spots = [round(x + self.moved(QPointF(art_x(x), art_y(line)), turn, nod)[0] * scale_x) for x in knots]
+                upper, lower = shifted(top) + room_y, shifted(bottom) + room_y
+                for left, right, near, far in zip(knots, knots[1:], spots, spots[1:]):
+                    if far > near and lower > upper:  # Whole pixels, so the pieces meet with no seams.
+                        with_rows.drawPixmap(QRectF(near + room_x, upper, far - near, lower - upper), pixmap, QRectF(left, top, right - left, bottom - top))
             with_rows.end()
-            self.bent[key] = bent
-        rect = self.rect(name).translated(x, y)
-        margin = BEND_MARGIN * rect.width() / self.scaled[name].width()
-        p.drawPixmap(rect.adjusted(-margin, 0, margin, 0), bent, QRectF(bent.rect()))
+            kept = bent, rect.adjusted(-room_x / scale_x, -room_y / scale_y, room_x / scale_x, room_y / scale_y)
+            self.remember(self.warps, key, kept)
+        return kept
+
+    def remember(self, cache, key, value):
+        if len(cache) >= CACHED:
+            del cache[next(iter(cache))]
+        cache[key] = value
+
+    def put_warped(self, p, name, turn, nod):
+        pixmap, rect = self.warped(name, turn, nod)
+        p.drawPixmap(rect, pixmap, QRectF(pixmap.rect()))
 
     def eyes_(self, p, pose, dx, dy):
         openness = pose.eye_open * (1 - pose.happy_eyes)
@@ -166,19 +194,6 @@ class Puppet:
         arc = QPainterPath(centre + QPointF(-22, 6 if smiling else 2))
         arc.quadTo(centre + QPointF(0, -22 if smiling else 8), centre + QPointF(22, 6 if smiling else 2))
         p.drawPath(arc)
-
-    def brows(self, p, pose, dx, dy):
-        """Drawn over the fringe, as anime does, or she looks as if she has none."""
-        raised = (pose.eye_open - 1) * 40 + pose.happy_eyes * 5
-        worry = pose.lifted * 7
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(BROW), 5, Qt.SolidLine, Qt.RoundCap))
-        for centre in self.eyes:
-            side = -1 if centre.x() < self.pivot.x() else 1
-            middle = QPointF(centre.x() + dx + side * 2, BROW_Y + dy - raised)
-            brow = QPainterPath(middle + QPointF(-side * 19, 3 - worry))
-            brow.quadTo(middle + QPointF(0, -7), middle + QPointF(side * 19, 2 + worry * .5))
-            p.drawPath(brow)
 
     def mouth_(self, p, pose, dx, dy):
         if pose.mouth_open < .1:
@@ -215,166 +230,57 @@ class Puppet:
             p.setBrush(shade)
             p.drawEllipse(spot, 31, 19)
 
-    def folder(self, p, pose):
-        """Roo hugging the file she has been handed."""
-        strength = min(1.0, pose.hold * 1.3)
-        body = self.rect("body")
-        centre = QPointF(body.center().x(), body.top() + body.height() * .52 + (1 - pose.hold) * 16)
-        p.save()
-        p.setOpacity(strength)
-        p.translate(centre)
-        p.rotate(-3 + pose.angle_x * 3)
-        p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(QColor(FOLDER_DARK))
-        p.drawRoundedRect(QRectF(-78, -68, 58, 28), 8, 8)
-        p.drawRoundedRect(QRectF(-78, -52, 156, 104), 10, 10)
-        p.setBrush(QColor("#FFFFFF"))
-        p.drawRoundedRect(QRectF(-64, -62, 128, 70), 5, 5)
-        p.setPen(QPen(QColor("#C7D6CC"), 5, Qt.SolidLine, Qt.RoundCap))
-        for y, end in ((-46, 44), (-30, 50), (-14, 24)):
-            p.drawLine(QPointF(-48, y), QPointF(end, y))
-        p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(QColor(FOLDER))
-        p.drawRoundedRect(QRectF(-78, -20, 156, 72), 10, 10)
-        p.restore()
+    @staticmethod
+    def sip(pose):
+        return max(0.0, math.sin(pose.clock * .95)) ** 3
 
-    def arm(self, p, side, angle, opacity=1.0):
-        """A sleeve swung out from the shoulder: 0 hangs down, 180 reaches straight up."""
-        body = self.rect("body")
-        p.save()
-        p.setOpacity(opacity)
-        p.translate(body.center().x() + side * body.width() * .32, body.top() + body.height() * .3)
-        p.rotate(-side * angle)
-        p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(QColor(HAND))
-        p.drawEllipse(QPointF(0, ARM_LENGTH), 17, 18)
-        sleeve = QPainterPath(QPointF(-17, -10))
-        sleeve.quadTo(QPointF(0, -20), QPointF(17, -10))
-        sleeve.quadTo(QPointF(24, 40), QPointF(19, 74))
-        sleeve.quadTo(QPointF(0, 84), QPointF(-19, 74))
-        sleeve.quadTo(QPointF(-24, 40), QPointF(-17, -10))
-        p.setBrush(QColor(SLEEVE))
-        p.drawPath(sleeve)
-        p.restore()
+    def key(self, pose):
+        """Which painting this pose shows. Held up comes first: she can be picked up mid-action."""
+        if pose.lifted > .3:
+            return "key lifted swing" if abs(pose.swing) > 7 else "key lifted"
+        if pose.hold > .05:
+            return "key hold hug" if pose.hold > .6 else "key hold low"
+        if pose.book > .05:
+            if pose.book < .6:
+                return "key read low"
+            return "key read turn" if pose.clock / 4 % 1 < .16 else "key read up"
+        if pose.write > .05:
+            if pose.write < .6:
+                return "key write low"
+            return "key write a" if math.sin(pose.clock * 3) > 0 else "key write b"
+        if pose.cup > .05:
+            if pose.cup < .6:
+                return "key tea low"
+            return "key tea sip" if self.sip(pose) > .35 else "key tea hold"
+        if pose.stretch > .05:
+            return "key stretch top" if pose.stretch > .6 else "key stretch mid"
+        if pose.ball > .2:
+            return "key ball down" if abs(math.sin(pose.clock * BOUNCE)) > .72 else "key ball up"
+        if pose.nap > .3:
+            return "key nap"
+        if pose.wave > .9:  # Up: her arm swings between the two highest paintings.
+            return "key wave top" if math.sin(pose.clock * 7) > -.2 else "key wave high"
+        for stop, name in ((.72, "key wave high"), (.48, "key wave side"), (.2, "key wave low")):
+            if pose.wave > stop:
+                return name
+        return "key down"
 
-    def chest(self):
-        body = self.rect("body")
-        return QPointF(body.center().x(), body.top() + body.height() * .52)
-
-    def book(self, p, pose):
-        """Reading, with a page turning now and then."""
+    def bounce(self, p, pose):
+        """The ball under her hand, leaving the floor and coming back to her palm."""
+        height = abs(math.sin(pose.clock * BOUNCE))
+        floor = QPointF(BALL_X, self.height - 6)
         p.save()
-        p.setOpacity(min(1.0, pose.book * 1.3))
-        p.translate(self.chest())
-        p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(QColor(COVER))
-        p.drawRoundedRect(QRectF(-88, -50, 176, 104), 8, 8)
-        p.setBrush(QColor("#FFFDF6"))
-        for side in (-1, 1):
-            page = QPainterPath(QPointF(0, -38))
-            page.quadTo(QPointF(side * 40, -50), QPointF(side * 80, -40))
-            page.lineTo(QPointF(side * 80, 44))
-            page.quadTo(QPointF(side * 40, 34), QPointF(0, 46))
-            page.closeSubpath()
-            p.drawPath(page)
-        p.setPen(QPen(QColor("#C7D6CC"), 4, Qt.SolidLine, Qt.RoundCap))
-        for side in (-1, 1):
-            for y in (-20, -2, 16):
-                p.drawLine(QPointF(side * 16, y), QPointF(side * 66, y))
-        turn = pose.clock / 4 % 1
-        if turn < .16:  # A page lifts and crosses the spine.
-            across = math.cos(turn / .16 * math.pi) * 78
-            leaf = QPainterPath(QPointF(0, -38))
-            leaf.quadTo(QPointF(across * .5, -62), QPointF(across, -48))
-            leaf.lineTo(QPointF(across, 36))
-            leaf.quadTo(QPointF(across * .5, 24), QPointF(0, 46))
-            leaf.closeSubpath()
-            p.setPen(QPen(QColor(LINE), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.setBrush(QColor("#FFFFFF"))
-            p.drawPath(leaf)
-        p.restore()
-
-    def notebook(self, p, pose):
-        """Homework: writing a line, then the next."""
-        p.save()
-        p.setOpacity(min(1.0, pose.write * 1.3))
-        p.translate(self.chest())
-        p.rotate(-2)
-        p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(QColor("#FFFEF9"))
-        p.drawRoundedRect(QRectF(-78, -52, 156, 104), 6, 6)
-        p.setPen(QPen(QColor("#BFD3E6"), 2))
-        rows = (-30, -8, 14, 36)
-        for y in rows:
-            p.drawLine(QPointF(-62, y), QPointF(62, y))
-        written = pose.clock / 2.6 % len(rows)
-        line = int(written)
-        p.setPen(QPen(QColor("#5C6B64"), 4, Qt.SolidLine, Qt.RoundCap))
-        for index, y in enumerate(rows[:line]):
-            p.drawLine(QPointF(-56, y - 5), QPointF(52, y - 5))
-        tip = QPointF(-56 + 108 * (written - line), rows[line] - 5)
-        p.drawLine(QPointF(-56, tip.y()), tip)
-        p.translate(tip + QPointF(0, -2 + math.sin(pose.clock * 24) * 2))
-        p.rotate(36)
-        p.setPen(QPen(QColor(LINE), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        pencil = QPainterPath(QPointF(0, 0))
-        pencil.lineTo(QPointF(-7, -14))
-        pencil.lineTo(QPointF(-7, -64))
-        pencil.lineTo(QPointF(7, -64))
-        pencil.lineTo(QPointF(7, -14))
-        pencil.closeSubpath()
-        p.setBrush(QColor(FOLDER))
-        p.drawPath(pencil)
-        p.restore()
-
-    def ball(self, p, pose):
-        """Bouncing a ball beside her, the arm following it."""
-        body = self.rect("body")
-        bounce = abs(math.sin(pose.clock * 4.2))
-        p.save()
-        p.setOpacity(min(1.0, pose.ball * 1.3))
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(0, 0, 0, 40))
-        floor = QPointF(body.right() + 22, self.height - 6)
-        p.drawEllipse(floor, 28 - bounce * 10, 7 - bounce * 2)
-        p.translate(floor.x(), floor.y() - 30 - bounce * 150)
-        p.scale(1 + (1 - bounce) ** 6 * .16, 1 - (1 - bounce) ** 6 * .16)
-        p.setPen(QPen(QColor(LINE), 4))
-        p.setBrush(QColor(BALL))
-        p.drawEllipse(QPointF(0, 0), 30, 30)
-        p.setPen(QPen(QColor("#FFF3D6"), 5))
-        p.setBrush(Qt.NoBrush)
-        p.drawArc(QRectF(-30, -14, 60, 28), 0, 180 * 16)
-        p.restore()
-        self.arm(p, 1, 28 + bounce * 34, min(1.0, pose.ball * 1.3))
-
-    def cup(self, p, pose):
-        """Tea held in both hands, lifted for a sip, with steam."""
-        sip = max(0.0, math.sin(pose.clock * .95)) ** 3
-        centre = self.chest() + QPointF(0, -18 - sip * 62)
-        p.save()
-        p.setOpacity(min(1.0, pose.cup * 1.3))
-        p.translate(centre)
-        p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(QColor("#FFFDF6"))
-        p.drawRoundedRect(QRectF(-38, -32, 76, 66), 14, 14)
-        p.setBrush(QColor(COVER))
-        p.drawEllipse(QRectF(-34, -40, 68, 18))
-        p.setBrush(QColor(HAND))
-        for side in (-1, 1):
-            p.drawEllipse(QPointF(side * 42, 8), 16, 17)
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(255, 255, 255, 215), 5, Qt.SolidLine, Qt.RoundCap))
-        for side in (-1, 1):
-            steam = QPainterPath(QPointF(side * 12, -46))
-            drift = math.sin(pose.clock * 2.4 + side) * 9
-            steam.cubicTo(QPointF(side * 12 + drift, -60), QPointF(side * 12 - drift, -72), QPointF(side * 12, -88))
-            p.drawPath(steam)
+        p.drawEllipse(floor, 28 - height * 10, 7 - height * 2)
+        p.translate(floor.x(), floor.y() - 30 - height * BALL_RISE)
+        p.scale(1 + (1 - height) ** 6 * .16, 1 - (1 - height) ** 6 * .16)
+        rect = self.rect("prop ball")
+        p.drawPixmap(QRectF(-rect.width() / 2, -rect.height() / 2, rect.width(), rect.height()), self.scaled["prop ball"], QRectF(self.scaled["prop ball"].rect()))
         p.restore()
 
     def snooze(self, p, pose):
         """Letters drifting up while she dozes."""
-        face = self.rect("face")
         p.save()
         p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.setBrush(Qt.NoBrush)
@@ -382,7 +288,7 @@ class Puppet:
             rise = (pose.clock * .32 + index / 3) % 1
             size = 11 + rise * 14
             p.setOpacity(min(1.0, pose.nap * 1.2) * math.sin(rise * math.pi))
-            at = QPointF(face.right() + 8 + rise * 34, face.top() + 54 - rise * 112)
+            at = QPointF(self.face.right() + 8 + rise * 34, self.face.top() + 54 - rise * 112)
             letter = QPainterPath(at + QPointF(-size, -size))
             letter.lineTo(at + QPointF(size, -size))
             letter.lineTo(at + QPointF(-size, size))
@@ -390,71 +296,13 @@ class Puppet:
             p.drawPath(letter)
         p.restore()
 
-    def scruff(self, p, pose):
-        """The back of her collar, pulled up behind her head towards the hand."""
-        grip = self.grip
-        p.save()
-        p.setOpacity(min(1.0, pose.lifted * 1.6))
-        p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(QColor(SLEEVE))
-        cloth = QPainterPath(grip + QPointF(-14, 2))
-        cloth.cubicTo(grip + QPointF(-20, 44), grip + QPointF(-62, 70), grip + QPointF(-92, 132))
-        cloth.lineTo(grip + QPointF(92, 132))
-        cloth.cubicTo(grip + QPointF(62, 70), grip + QPointF(20, 44), grip + QPointF(14, 2))
-        cloth.closeSubpath()
-        p.drawPath(cloth)
-        p.setPen(QPen(QColor("#CDBFA6"), 3, Qt.SolidLine, Qt.RoundCap))
-        for x in (-9, 0, 9):  # Creases where the cloth is gathered in the fingers.
-            p.drawLine(grip + QPointF(x * .7, 8), grip + QPointF(x * 3.4, 66))
-        p.restore()
-
-    def hand(self, p, pose):
-        """The hand that has picked her up: finger and thumb pinched on the cloth, the rest curled."""
-        p.save()
-        p.setOpacity(min(1.0, pose.lifted * 1.6))
-        p.translate(self.grip)
-        p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(QColor(HAND))
-        wrist = QPainterPath(QPointF(-24, -112))
-        wrist.quadTo(QPointF(-30, -86), QPointF(-34, -70))
-        wrist.lineTo(QPointF(40, -70))
-        wrist.quadTo(QPointF(34, -92), QPointF(30, -112))
-        p.drawPath(wrist)
-        for x, y in ((46, -52), (52, -33), (44, -16)):  # The curled fingers.
-            p.drawEllipse(QPointF(x, y), 15, 12)
-        thumb = QPainterPath(QPointF(-52, -40))
-        thumb.quadTo(QPointF(-44, -8), QPointF(-9, 7))
-        thumb.quadTo(QPointF(0, 8), QPointF(-1, -7))
-        thumb.quadTo(QPointF(-14, -24), QPointF(-12, -46))
-        p.drawPath(thumb)
-        finger = QPainterPath(QPointF(40, -42))
-        finger.quadTo(QPointF(34, -8), QPointF(9, 7))
-        finger.quadTo(QPointF(0, 8), QPointF(1, -7))
-        finger.quadTo(QPointF(12, -24), QPointF(10, -48))
-        p.drawPath(finger)
-        palm = QPainterPath(QPointF(-52, -40))
-        palm.quadTo(QPointF(-52, -82), QPointF(-6, -84))
-        palm.quadTo(QPointF(44, -84), QPointF(40, -42))
-        palm.quadTo(QPointF(10, -28), QPointF(-12, -38))
-        palm.quadTo(QPointF(-30, -32), QPointF(-52, -40))
-        p.setPen(Qt.NoPen)
-        p.drawPath(palm)
-        p.setPen(QPen(QColor(LINE), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        top = QPainterPath(QPointF(-52, -40))
-        top.quadTo(QPointF(-52, -82), QPointF(-6, -84))
-        top.quadTo(QPointF(44, -84), QPointF(40, -42))
-        p.setBrush(Qt.NoBrush)
-        p.drawPath(top)
-        p.restore()
-
     def sweat(self, p, pose):
-        face = self.rect("face")
         drop = QPainterPath(QPointF(0, -16))
         drop.quadTo(QPointF(13, 4), QPointF(0, 9))
         drop.quadTo(QPointF(-13, 4), QPointF(0, -16))
         p.save()
         p.setOpacity(min(1.0, pose.lifted))
-        p.translate(face.left() + 16, face.top() + 92 + math.sin(pose.clock * 5) * 4)
+        p.translate(self.face.left() + 16, self.face.top() + 92 + math.sin(pose.clock * 5) * 4)
         p.setPen(QPen(QColor(LINE), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.setBrush(QColor("#BFE0F2"))
         p.drawPath(drop)
@@ -464,11 +312,10 @@ class Puppet:
         """Little stars around her head when she is pleased."""
         if pose.sparkle < .05:
             return
-        face = self.rect("face")
         for index, (x, y) in enumerate(((-.62, -.12), (.66, .02), (-.5, .62), (.62, .66))):
             twinkle = .5 + .5 * math.sin(pose.clock * 5 + index * 1.9)
             size = (7 + 9 * twinkle) * min(pose.sparkle, 1)
-            centre = face.center() + QPointF(x * face.width(), y * face.height())
+            centre = self.face.center() + QPointF(x * self.face.width(), y * self.face.height())
             star = QPainterPath(centre + QPointF(0, -size))
             for turn in (QPointF(size, 0), QPointF(0, size), QPointF(-size, 0), QPointF(0, -size)):
                 star.quadTo(centre, centre + turn)
@@ -484,70 +331,30 @@ class Puppet:
         p.scale(scale, scale)
         p.translate(-self.width / 2, -self.height)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        ax, ay = pose.angle_x * TURN, pose.angle_y * NOD
+        turn, nod = round(pose.angle_x * TURN_STEPS), round(pose.angle_y * NOD_STEPS)
         feet = QPointF(self.width / 2, self.height)
         p.translate(feet)
         p.rotate(pose.lean)
+        p.scale(1, 1 + pose.breath * .006)
         p.translate(-feet)
         p.translate(self.grip)
         p.rotate(pose.swing * pose.lifted)
-        p.scale(1, 1 + pose.lifted * .035)
         p.translate(-self.grip)
-        lift = pose.breath * 1.8
-        head_at = lambda: (p.translate(self.pivot), p.rotate(pose.tilt), p.translate(-self.pivot))
-        p.save()
-        head_at()
-        self.strands(p, "back hair", pose.sway, .22, -ax * .55, -ay * .4 - lift * .4)
-        p.restore()
-        if pose.lifted > .02:
-            self.scruff(p, pose)
-        p.save()
-        p.translate(feet)
-        p.scale(1, 1 + pose.breath * .006)
-        p.translate(-feet)
-        if pose.lifted > .02:  # Her legs trail behind the swing.
-            self.strands(p, "body", -pose.swing * pose.lifted * .7, .46)
-        else:
-            self.put(p, "body")
-        if pose.hold > .02:
-            self.folder(p, pose)
-        if pose.book > .02:
-            self.book(p, pose)
-        if pose.write > .02:
-            self.notebook(p, pose)
-        hands = max(pose.hold, pose.book, pose.write)
-        if hands > .02:
-            p.setOpacity(min(1.0, hands * 1.3))
-            self.put(p, "handwear")
-            p.setOpacity(1)
-        p.restore()
-        p.save()
-        head_at()
-        p.translate(0, -lift)
-        self.put(p, "ears", -ax * .3, ay * .2)
-        self.put(p, "face", ax * .22, ay * .22)
-        self.cheeks(p, pose, ax * .9, ay * .9)
-        self.eyes_(p, pose, ax, ay)
-        self.mouth_(p, pose, ax * 1.08, ay * 1.08)
-        self.strands(p, "front hair", pose.sway * .6, .52, ax * 1.2, ay * .9)
-        self.strands(p, "headwear", pose.sway * .3, .0, ax * 1.1, ay * .9)
-        self.brows(p, pose, ax * 1.05, ay)
-        p.restore()
-        if pose.wave > .02:
-            self.arm(p, 1, 40 + pose.wave * 92 + math.sin(pose.clock * 11) * 15, min(1.0, pose.wave * 1.6))
-        if pose.stretch > .02:
-            for side in (-1, 1):
-                self.arm(p, side, 20 + pose.stretch * 142 + math.sin(pose.clock * 3) * 4, min(1.0, pose.stretch * 1.6))
-        if pose.ball > .02:
-            self.ball(p, pose)
-        if pose.cup > .02:
-            self.cup(p, pose)
+        key = self.key(pose)
+        self.put_warped(p, key, turn, nod)
+        eye = self.moved(QPointF(self.pivot.x(), self.eye_line), turn, nod)
+        mouth = self.moved(self.mouth, turn, nod)
+        self.cheeks(p, pose, *eye)
+        self.eyes_(p, pose, *eye)
+        if key != "key tea sip":  # There the cup is at her lips, and the painting already shows it.
+            self.mouth_(p, pose, *mouth)
+        if pose.ball > .2:
+            self.bounce(p, pose)
         if pose.nap > .02:
             self.snooze(p, pose)
         self.glints(p, pose)
         if pose.lifted > .02:
             self.sweat(p, pose)
-            self.hand(p, pose)
         p.restore()
 
 
@@ -566,16 +373,16 @@ _MOODS = {
     "napping": Pose(eye_open=0, angle_y=.7, blush=.4, nap=1),
     "dangling": Pose(eye_open=1.12, mouth_open=.28, blush=.7, angle_y=.3, lifted=1),
 }
-_EASED = [field.name for field in fields(Pose) if field.name not in ("breath", "sway", "swing", "eye_open", "clock")]
+_EASED = [field.name for field in fields(Pose) if field.name not in ("breath", "swing", "eye_open", "clock")]
 
 
 class Rig:
-    """Moves the parameters over time: eased moods, breathing, blinking, gaze and the hair's spring."""
+    """Moves the parameters over time: eased moods, breathing, blinking, gaze and the swing when held."""
 
     def __init__(self, reduced_motion=False):
         self.pose = replace(_MOODS["idle"])
         self.reduced_motion = reduced_motion
-        self.velocity = 0.0
+        self.reaching = {name: 0.0 for name in ARMS}
         self.swinging = 0.0
         self.next_blink = 2.5
         self.blinking = 0.0
@@ -591,15 +398,17 @@ class Rig:
         if self.reduced_motion:
             for name, value in wanted.items():
                 setattr(pose, name, value)
-            pose.eye_open, pose.breath, pose.sway, pose.swing = goal.eye_open, 0.0, 0.0, 0.0
+            self.reaching = {name: wanted[name] for name in ARMS}
+            pose.eye_open, pose.breath, pose.swing = goal.eye_open, 0.0, 0.0
             return pose
         pose.clock += seconds
         wanted["eye_x"] = look[0]
         wanted["eye_y"] = goal.eye_y if mood == "working" else look[1] * .7
         wanted["angle_x"], wanted["angle_y"] = look[0] * .8, goal.angle_y + look[1] * .4
-        wanted["tilt"] = look[0] * 2.5
-        turned = pose.angle_x
-        rate = 1 - math.exp(-seconds * 9)
+        rate, arm_rate = 1 - math.exp(-seconds * 9), 1 - math.exp(-seconds * ARM_EASE)
+        for name in ARMS:
+            self.reaching[name] += (wanted.pop(name) - self.reaching[name]) * rate
+            setattr(pose, name, getattr(pose, name) + (self.reaching[name] - getattr(pose, name)) * arm_rate)
         for name, value in wanted.items():
             setattr(pose, name, getattr(pose, name) + (value - getattr(pose, name)) * rate)
         pose.breath = math.sin(pose.clock * 1.9)
@@ -608,27 +417,19 @@ class Rig:
             pose.eye_x = math.sin(pose.clock * 3.2) * .7
         elif mood == "excited":
             pose.lean += math.sin(pose.clock * 13) * 1.6
-        elif mood in ("happy", "greeting"):
-            pose.tilt += math.sin(pose.clock * 6) * 3
         elif mood == "reading":
             pose.eye_x = math.sin(pose.clock * 1.7) * .6
         elif mood == "homework":
             pose.eye_x = math.sin(pose.clock * 2.4) * .4
         elif mood == "playing":
-            pose.eye_y = .8 - abs(math.sin(pose.clock * 4.2)) * 1.1
+            pose.eye_y = .8 - abs(math.sin(pose.clock * BOUNCE)) * 1.1
             pose.eye_x = .7
-        elif mood == "napping":
-            pose.tilt += math.sin(pose.clock * .9) * 3
         if talking:
             pose.mouth_open = max(pose.mouth_open, .16 + .3 * abs(math.sin(pose.clock * 13)))
         self.blink(seconds, goal)
-        # Head movement and a light breeze push the hair, and the spring carries it on.
         # Held up, she swings like a pendulum, and the pull sends her trailing behind the hand.
         self.swinging += ((max(-24.0, min(24.0, -pull * .045)) - pose.swing) * 42 - self.swinging * 2.4) * seconds
         pose.swing = max(-MAX_SWING, min(MAX_SWING, pose.swing + self.swinging * seconds))
-        push = -(pose.angle_x - turned) / max(seconds, 1e-3) * 7 + math.sin(pose.clock * 1.1) * 2.2 + pose.swing * pose.lifted
-        self.velocity += ((push - pose.sway) * 34 - self.velocity * 6.5) * seconds
-        pose.sway = max(-20.0, min(20.0, pose.sway + self.velocity * seconds))
         self.startle = max(0.0, self.startle - seconds * 2.4)
         return pose
 

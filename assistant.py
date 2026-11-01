@@ -362,7 +362,7 @@ class Assistant(QWidget):
         self.move(where - self.grip)
 
     def pick_up(self):
-        """By the back of her collar. A picture has no collar, so it just follows the pointer."""
+        """By her collar. A picture has no collar, so it just follows the pointer."""
         if self.custom:
             return
         side = SIZES[self.size_name]
@@ -378,7 +378,7 @@ class Assistant(QWidget):
         self.set_mood("dangling")
         self.lifting = True
         self.last_x = self.x()
-        self.setCursor(Qt.BlankCursor)  # Her own drawn hand takes the pointer's place.
+        self.setCursor(Qt.ClosedHandCursor)  # The pointer is the hand that holds her.
 
     def put_down(self):
         if self.lifting:

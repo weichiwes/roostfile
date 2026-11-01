@@ -39,6 +39,13 @@ TOOLS = (
     {"name": "list_collection_files", "description": "List the files in one collection.",
      "annotations": {"readOnlyHint": True},
      "inputSchema": {"type": "object", "required": ["collection"], "properties": {"collection": {"type": "string", "description": "The collection's name"}}}},
+    {"name": "list_linked_files", "description": "List the files the person has linked to this one, directly or through others, which usually belong to the same piece of work.",
+     "annotations": {"readOnlyHint": True},
+     "inputSchema": {"type": "object", "required": ["file_id"], "properties": {"file_id": {"type": "integer"}}}},
+    {"name": "link_files", "description": "Link files that belong together. Files are never moved. Needs write access in Settings.",
+     "annotations": {"readOnlyHint": False, "destructiveHint": False},
+     "inputSchema": {"type": "object", "required": ["file_ids"], "properties": {
+         "file_ids": {"type": "array", "items": {"type": "integer"}, "description": "Two or more files. The first is linked to each of the others."}}}},
     {"name": "add_to_collection", "description": "Add files to a collection, creating it if needed. Files are never moved. Needs write access in Settings.",
      "annotations": {"readOnlyHint": False, "destructiveHint": False},
      "inputSchema": {"type": "object", "required": ["collection", "file_ids"], "properties": {
@@ -105,16 +112,34 @@ class Server:
         page = core.search_page(collection=self.collection_named(core, collection)["id"], limit=MAX_RESULTS)
         return {"total": page["total"], "files": [self.summary(row) for row in page["rows"]]}
 
-    def add_to_collection(self, collection, file_ids):
-        core = self.archive()
-        if not self.allowed("mcp_write"):
-            raise ToolError(NOT_ALLOWED)
+    def known_ids(self, core, file_ids):
         if not isinstance(file_ids, list):
             raise ToolError("file_ids must be a list of numbers.")
         ids = [int(file_id) for file_id in file_ids]
         missing = [file_id for file_id in ids if core.get_file(file_id) is None]
         if missing:
             raise ToolError(f"There are no files with ids {missing}.")
+        return ids
+
+    def list_linked_files(self, file_id):
+        core = self.archive()
+        file_id = self.known_ids(core, [file_id])[0]
+        return {"files": [self.summary(row) for row in core.bundle(file_id) if row["id"] != file_id][:MAX_RESULTS]}
+
+    def link_files(self, file_ids):
+        core = self.archive()
+        if not self.allowed("mcp_write"):
+            raise ToolError(NOT_ALLOWED)
+        ids = self.known_ids(core, file_ids)
+        if len(set(ids)) < 2:
+            raise ToolError("Link needs at least two different files.")
+        return {"linked": core.link(ids)}
+
+    def add_to_collection(self, collection, file_ids):
+        core = self.archive()
+        if not self.allowed("mcp_write"):
+            raise ToolError(NOT_ALLOWED)
+        ids = self.known_ids(core, file_ids)
         try:
             target = self.collection_named(core, collection)["id"]
         except ToolError:

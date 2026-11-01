@@ -2,6 +2,7 @@
 
 No socket, HTTP, telemetry, remote model, or automatic file deletion is used.
 The optional ``copy`` mode stores content-addressed copies inside data_dir/vault.
+A file is moved only when someone has chosen that, and it can be put back.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import csv
 import hashlib
 from contextlib import contextmanager
+import errno
 import html
 import io
 from itertools import islice
@@ -36,6 +38,9 @@ MAX_EXTRACT_BYTES = 24 * 1024 * 1024
 MAX_TEXT_CHARS = 200_000
 MAX_XML_BYTES = 16 * 1024 * 1024
 MAX_XML_TOTAL = 48 * 1024 * 1024
+MAX_BUNDLE = 500
+MAX_GRAPH_LINKS = 2000
+NEARBY_SECONDS = 3600
 
 TEXT_EXTS = {
     ".txt", ".md", ".markdown", ".csv", ".tsv", ".log", ".rst", ".tex",
@@ -193,6 +198,52 @@ def _cloud_placeholder(stat):
     attrs = getattr(stat, "st_file_attributes", 0)
     # SF_DATALESS is how macOS marks a file still in iCloud.
     return bool(attrs & (0x1000 | 0x40000 | 0x400000)) or bool(getattr(stat, "st_flags", 0) & 0x40000000)
+
+
+def _same_bytes(one, other):
+    """Compared whole, since a move deletes the original on the strength of this."""
+    with open(one, "rb") as first, open(other, "rb") as second:
+        while True:
+            left, right = first.read(1024 * 1024), second.read(1024 * 1024)
+            if left != right:
+                return False
+            if not left:
+                return True
+
+
+def _free_name(path):
+    """A name nothing else has: report.pdf, then report (2).pdf."""
+    candidate, number = path, 2
+    while candidate.exists():
+        candidate, number = path.with_name(f"{path.stem} ({number}){path.suffix}"), number + 1
+    return candidate
+
+
+def _carry_file(origin, target):
+    """Moves one file. Across disks it is copied and compared before the original goes."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise FileExistsError("Something else is already at that location.")
+    try:
+        os.rename(origin, target)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    temporary = target.with_name(target.name + ".part")
+    try:
+        shutil.copyfile(origin, temporary)
+        shutil.copystat(origin, temporary)
+        if not _same_bytes(origin, temporary):
+            raise OSError("The copy did not match, so the original was left in place.")
+        os.rename(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    try:
+        os.unlink(origin)
+    except OSError:
+        target.unlink(missing_ok=True)  # Two copies would be worse than a move that did not happen.
+        raise
 
 
 def _within(path: Path | str, root: Path | str) -> bool:
@@ -589,6 +640,19 @@ _SCHEMA = """
         added_at REAL NOT NULL,
         PRIMARY KEY (collection_id, file_id)
     );
+    CREATE TABLE IF NOT EXISTS file_links (
+        low INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        high INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        added_at REAL NOT NULL,
+        PRIMARY KEY (low, high),
+        CHECK (low < high)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS file_links_high ON file_links(high);
+    CREATE TABLE IF NOT EXISTS moved_files (
+        file_id INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+        original TEXT NOT NULL,
+        moved_at REAL NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS collection_files_file ON collection_files(file_id);
     CREATE INDEX IF NOT EXISTS files_source ON files(source_id);
     CREATE INDEX IF NOT EXISTS files_used ON files(last_used DESC) WHERE last_used>0;
@@ -703,11 +767,12 @@ class ArchiveCore:
             self._write_search_index(db, row["id"], search_text)
         db.execute("DELETE FROM sources WHERE id=?", (picked["id"],))
 
-    def adopt(self, paths):
+    def adopt(self, paths, mode="index"):
         """Take in what someone handed over, and nothing else from around it.
 
         A folder becomes a source. A single file is remembered on its own, so
-        the rest of its folder is never read. Returns the ``only`` for scan_all.
+        the rest of its folder is never read. ``copy`` also keeps a saved copy.
+        Returns the ``only`` for scan_all.
         """
         only, problem = {}, None
         for raw in paths:
@@ -720,27 +785,29 @@ class ArchiveCore:
                         raise ValueError("This is in a folder that is never indexed, such as node_modules.")
                     only.setdefault(covering["path"], []).append("" if inside == os.curdir else inside)
                 elif path.is_dir():
-                    only.setdefault(self.add_source(path)["path"], []).append("")
+                    only.setdefault(self.add_source(path, mode)["path"], []).append("")
                 elif path.is_file():
-                    only.setdefault(self._pick_file(path), []).append(path.name)
+                    only.setdefault(self._pick_file(path, mode), []).append(path.name)
             except (ValueError, OSError) as exc:
                 problem = exc  # One bad item does not lose the rest of the armful.
         if problem and not only:
             raise problem
         return only
 
-    def _pick_file(self, path):
+    def _pick_file(self, path, mode="index"):
         if _within(path, self.data_dir):
             raise ValueError("The archive data folder cannot be a source.")
         folder, key = path.parent, _path_key(path.parent)
         with self._write_lock, self._connect() as db:
             row = db.execute("SELECT * FROM sources WHERE path_key=?", (key,)).fetchone()
             if row is None:
-                db.execute("INSERT INTO sources(path,path_key,mode,added_at,picks) VALUES(?,?,'index',?,?)",
-                           (str(folder), key, time.time(), json.dumps([path.name], ensure_ascii=False)))
+                db.execute("INSERT INTO sources(path,path_key,mode,added_at,picks) VALUES(?,?,?,?,?)",
+                           (str(folder), key, mode, time.time(), json.dumps([path.name], ensure_ascii=False)))
                 return str(folder)
             picks = set(json.loads(row["picks"])) | {path.name}
-            db.execute("UPDATE sources SET picks=? WHERE id=?", (json.dumps(sorted(picks), ensure_ascii=False), row["id"]))
+            # Keeping copies is the safer promise, so a later pick never quietly drops it.
+            db.execute("UPDATE sources SET picks=?,mode=? WHERE id=?",
+                       (json.dumps(sorted(picks), ensure_ascii=False), "copy" if mode == "copy" else row["mode"], row["id"]))
             return row["path"]
 
     def files_at(self, paths):
@@ -975,6 +1042,11 @@ class ArchiveCore:
                 db.execute("UPDATE file_bodies SET search_text=? WHERE file_id=?", (search_text, new["id"]))
                 self._write_search_index(db, new["id"], search_text)
                 db.execute("UPDATE OR IGNORE collection_files SET file_id=? WHERE file_id=?", (new["id"], old["id"]))
+                db.execute("UPDATE OR IGNORE moved_files SET file_id=? WHERE file_id=?", (new["id"], old["id"]))
+                for link in db.execute("SELECT low,high FROM file_links WHERE low=? OR high=?", (old["id"], old["id"])).fetchall():
+                    other = link["high"] if link["low"] == old["id"] else link["low"]
+                    if other != new["id"]:
+                        db.execute("INSERT OR IGNORE INTO file_links(low,high,added_at) VALUES(?,?,?)", (min(other, new["id"]), max(other, new["id"]), time.time()))
                 if self._fts:
                     db.execute("DELETE FROM file_search WHERE rowid=?", (old["id"],))
                 db.execute("DELETE FROM files WHERE id=?", (old["id"],))
@@ -1396,6 +1468,191 @@ class ArchiveCore:
     def collections_of(self, file_id):
         with self._connect() as db:
             return {row[0] for row in db.execute("SELECT collection_id FROM collection_files WHERE file_id=?", (file_id,))}
+
+    def link(self, file_ids):
+        """Ties files together, spoked around the first, which keeps the picture readable. Returns how many ties are new."""
+        ids = list(dict.fromkeys(int(file_id) for file_id in file_ids))
+        moment = time.time()
+        with self._write_lock, self._connect() as db:
+            before = db.total_changes
+            db.executemany("INSERT OR IGNORE INTO file_links(low,high,added_at) VALUES(?,?,?)",
+                           ((min(ids[0], other), max(ids[0], other), moment) for other in ids[1:]))
+            return db.total_changes - before
+
+    def unlink(self, one, other):
+        with self._write_lock, self._connect() as db:
+            db.execute("DELETE FROM file_links WHERE low=? AND high=?", (min(one, other), max(one, other)))
+
+    def unlink_all(self, file_id):
+        with self._write_lock, self._connect() as db:
+            db.execute("DELETE FROM file_links WHERE low=? OR high=?", (file_id, file_id))
+
+    def links_of(self, file_id):
+        """The files tied directly to this one."""
+        with self._connect() as db:
+            return [self._file_dict(row) for row in db.execute(
+                "SELECT f.* FROM file_links l JOIN files f ON f.id=CASE WHEN l.low=? THEN l.high ELSE l.low END"
+                " WHERE l.low=? OR l.high=? ORDER BY f.name COLLATE NOCASE", (file_id, file_id, file_id))]
+
+    def bundle(self, file_id):
+        """Everything reachable from this file through ties, itself included."""
+        with self._connect() as db:
+            return [self._file_dict(row) for row in db.execute(
+                "WITH RECURSIVE reached(id) AS (SELECT ? UNION SELECT CASE WHEN l.low=r.id THEN l.high ELSE l.low END"
+                " FROM reached r JOIN file_links l ON l.low=r.id OR l.high=r.id)"
+                f" SELECT f.* FROM reached r JOIN files f ON f.id=r.id ORDER BY f.name COLLATE NOCASE LIMIT {MAX_BUNDLE}", (file_id,))]
+
+    def link_graph(self):
+        """Every tie and the files on either end, for drawing them."""
+        with self._connect() as db:
+            edges = [(row["low"], row["high"]) for row in db.execute(f"SELECT low,high FROM file_links ORDER BY added_at DESC LIMIT {MAX_GRAPH_LINKS}")]
+            ids = sorted({file_id for edge in edges for file_id in edge})
+            nodes = []
+            for start in range(0, len(ids), 500):
+                batch = ids[start:start + 500]
+                nodes += [self._file_dict(row) for row in db.execute(f"{self._ROW_WITH_BODY} WHERE f.id IN ({','.join('?' * len(batch))})", batch)]
+            return {"nodes": nodes, "edges": edges}
+
+    def linked_counts(self, file_ids):
+        """How many ties each of these files has, leaving out those with none."""
+        ids, counts = [int(file_id) for file_id in file_ids], {}
+        with self._connect() as db:
+            for start in range(0, len(ids), 400):
+                marks = ",".join("?" * len(ids[start:start + 400]))
+                batch = ids[start:start + 400] * 2
+                for row in db.execute(f"SELECT low,high FROM file_links WHERE low IN ({marks}) OR high IN ({marks})", batch):
+                    for file_id in (row["low"], row["high"]):
+                        counts[file_id] = counts.get(file_id, 0) + 1
+        return {file_id: count for file_id, count in counts.items() if file_id in set(ids)}
+
+    def suggest_links(self, file_id, limit=6):
+        """Files likely to belong with this one, each with why. Nothing is tied until someone says so."""
+        row = self.get_file(file_id)
+        if not row:
+            return []
+        taken = {item["id"] for item in self.bundle(file_id)}
+        stem = _normal(Path(row["name"]).stem)
+        same_name, nearby, folder = [], [], os.path.dirname(row["relative_path"])
+        with self._connect() as db:
+            if len(stem) >= 3:
+                pattern = stem.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ".%"
+                same_name = [(item, "Same name") for item in db.execute(
+                    "SELECT * FROM files WHERE name_norm LIKE ? ESCAPE '\\' AND missing=0 AND id<>? LIMIT 12", (pattern, file_id))]
+            nearby = [(item, "Saved around the same time") for item in db.execute(
+                "SELECT * FROM files WHERE source_id=? AND missing=0 AND id<>? AND ABS(mtime-?)<? ORDER BY ABS(mtime-?) LIMIT 12",
+                (row["source_id"], file_id, row["mtime"], NEARBY_SECONDS, row["mtime"])) if os.path.dirname(item["relative_path"]) == folder]
+        mentions = []
+        if len(stem) >= 4:
+            matches = self.search(stem, limit=12)
+            words = self.bodies([item["id"] for item in matches])
+            mentions = [(item, "Mentions this file") for item in matches if stem in _normal(words.get(item["id"], ""))]
+        found = same_name + mentions + nearby
+        offers = {}
+        for item, why in found:
+            item = dict(item)
+            if item["id"] not in taken and item["id"] not in offers and (not row["version_key"] or item.get("version_key") != row["version_key"]):
+                offers[item["id"]] = {"id": item["id"], "name": item["name"], "ext": item["ext"], "kind": item["kind"], "why": why}
+        return list(offers.values())[:limit]
+
+    def moved_from(self, file_id):
+        """Where a file was before it was moved into the library, or an empty string."""
+        with self._connect() as db:
+            row = db.execute("SELECT original FROM moved_files WHERE file_id=?", (file_id,)).fetchone()
+            return row["original"] if row else ""
+
+    def _repoint(self, db, row, target, source):
+        """The catalogue follows a file to its new home, so tags, ties and read text all stay."""
+        relative = os.path.relpath(target, source["path"])
+        db.execute("UPDATE files SET source_id=?,path=?,path_key=?,relative_path=?,path_norm=?,version_key=?,missing=0 WHERE id=?",
+                   (source["id"], str(target), _path_key(target), relative, _normal(relative), _family(source["id"], relative, row["name"]), row["id"]))
+        body = db.execute("SELECT text FROM file_bodies WHERE file_id=?", (row["id"],)).fetchone()
+        search_text = self._search_value(row["name"], relative, row["tags"], body["text"] if body else "")
+        db.execute("UPDATE file_bodies SET search_text=? WHERE file_id=?", (search_text, row["id"]))
+        self._write_search_index(db, row["id"], search_text)
+        left = db.execute("SELECT * FROM sources WHERE id=?", (row["source_id"],)).fetchone()
+        if left is None or left["id"] == source["id"]:
+            return
+        if left["picks"]:
+            db.execute("UPDATE sources SET picks=? WHERE id=?", (json.dumps(sorted(set(json.loads(left["picks"])) - {row["name"]}), ensure_ascii=False), left["id"]))
+        if not db.execute("SELECT 1 FROM files WHERE source_id=? LIMIT 1", (left["id"],)).fetchone() and (left["picks"] or not Path(left["path"]).exists()):
+            db.execute("DELETE FROM sources WHERE id=?", (left["id"],))  # Handed over file by file, and all of them have gone.
+
+    def _home_for(self, folder):
+        """The source a moved file belongs to, made if there is none."""
+        covering = next((row for row in self.sources() if not row["picks"] and _within(folder, row["path"])), None)
+        return covering or self.add_source(folder)
+
+    def move_files(self, moves, library, emptied=()):
+        """Moves files into the library. ``moves`` pairs a file id with its path inside the library.
+
+        The original goes only after the new file is safely in place. Nothing is
+        replaced: a name that is taken gets a number. One failure leaves the
+        rest of the armful unaffected. ``emptied`` lists folders that are left
+        behind if nothing remains in them. Returns the ids moved and what went wrong.
+        """
+        library = _assert_local_path(library, check_links=True)
+        if _within(library, self.data_dir):
+            raise ValueError("The library cannot be inside the archive data folder.")
+        library.mkdir(parents=True, exist_ok=True)
+        moved, problems = [], []
+        with self._scan_lock:
+            home = self._home_for(library)
+            for file_id, inside in moves:
+                row = self.get_file(file_id)
+                if not row or _within(row["path"], library):
+                    continue
+                try:
+                    origin = _assert_local_path(row["path"], check_links=True)
+                    if row["missing"] or not origin.is_file():
+                        raise OSError("The file is not at its original location.")
+                    target = _free_name(library / inside)
+                    _carry_file(origin, target)
+                    try:
+                        with self._write_lock, self._connect() as db:
+                            db.execute("INSERT OR IGNORE INTO moved_files(file_id,original,moved_at) VALUES(?,?,?)", (file_id, str(origin), time.time()))
+                            self._repoint(db, row, target, home)
+                    except Exception:
+                        _carry_file(target, origin)  # A file the catalogue cannot find is as good as lost.
+                        raise
+                    moved.append(file_id)
+                except Exception as exc:  # The rest of the armful still goes.
+                    problems.append((row["name"], str(exc)[:200]))
+            for folder in emptied:
+                self._tidy_away(Path(folder))
+        return {"moved": moved, "problems": problems}
+
+    def _tidy_away(self, folder):
+        """Removes folders a move has emptied. rmdir refuses one with anything left in it, so nothing is lost."""
+        for inside, _, _ in os.walk(folder, topdown=False):
+            try:
+                os.rmdir(inside)
+            except OSError:
+                pass
+        if not folder.exists():
+            with self._write_lock, self._connect() as db:
+                db.execute("DELETE FROM sources WHERE path_key=? AND NOT EXISTS (SELECT 1 FROM files WHERE source_id=sources.id)", (_path_key(folder),))
+
+    def move_back(self, file_id):
+        """Returns a moved file to where it came from. Nothing already there is replaced."""
+        original = self.moved_from(file_id)
+        row = self.get_file(file_id)
+        if not original or not row:
+            raise ValueError("This file was not moved here.")
+        origin, target = Path(row["path"]), _assert_local_path(original)
+        if target.exists():
+            raise ValueError("Something else is already at the original location.")
+        with self._scan_lock:
+            _carry_file(origin, target)
+            try:
+                covering = next((item for item in self.sources() if not item["picks"] and _within(target, item["path"])), None)
+                held_by = None if covering else self._pick_file(target)
+                source = covering or next(item for item in self.sources() if item["path"] == held_by)
+                with self._write_lock, self._connect() as db:
+                    self._repoint(db, row, target, source)
+                    db.execute("DELETE FROM moved_files WHERE file_id=?", (file_id,))
+            except Exception:
+                _carry_file(target, origin)
+                raise
 
     def export_collection(self, collection_id, path):
         """A plain CSV list, so a collection is never trapped in this archive."""

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QStackedWidget, QSplitter, QListView,
     QAbstractItemView, QStyledItemDelegate, QStyle, QComboBox, QDialog, QDialogButtonBox,
     QTextEdit, QFileDialog, QMessageBox, QCheckBox, QRadioButton, QButtonGroup,
-    QHeaderView, QInputDialog, QKeySequenceEdit, QMenu, QScrollArea, QSizePolicy, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
+    QHeaderView, QInputDialog, QKeySequenceEdit, QListWidget, QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
 )
 
 from background import (
@@ -39,6 +39,7 @@ from i18n import LANGUAGES, app_name, condition_label, language, set_language, t
 import ocr
 from assistant import FRAME_MS, NAP_AFTER, PASTIMES, SIZES, Assistant, clear_images, install_image, install_image_set
 import character
+from link_board import LinkBoard
 from pages import page_count, render_page
 from search_ux import KIND_EXTS, example_word, explain_matches, file_group, highlight_spans, parse_query, related_queries, resolve_filters, topic_of
 from theme import (
@@ -74,6 +75,9 @@ LAUNCHING_EXTS = {
     ".js", ".jse", ".vbs", ".vbe", ".wsf", ".wsh", ".ws",
     ".app", ".command", ".pkg", ".dmg", ".sh",
 }
+PICKER_ROWS = 40
+MAP_OFFERS = 5
+MAX_LINKS_SHOWN = 3
 MATCH_LABELS = {"name": "Filename", "tags": "Tags", "body": "Text", "location": "Location", "info": "File details"}
 HOME_FILES = 9
 HOME_USED = 5
@@ -117,6 +121,7 @@ STROKES = {
     "music": '<path d="M10 17V4l11-2v13M10 7l11-2"/><ellipse cx="6" cy="18" rx="4" ry="3"/><ellipse cx="17" cy="16" rx="4" ry="3"/>',
     "table": '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M3 15h18M10 4v16"/>',
     "plus": '<path d="M12 5v14M5 12h14"/>',
+    "link": '<path d="M10 14a4.5 4.5 0 0 0 6.4 0l3.2-3.2a4.5 4.5 0 0 0-6.4-6.4L11.8 5.800"/><path d="M14 10a4.500 4.500 0 0 0-6.400 0l-3.200 3.200a4.500 4.500 0 0 0 6.400 6.400l1.400-1.400"/>',
     "back": '<path d="m14 6-6 6 6 6"/>',
     "close": '<path d="m6 6 12 12M18 6 6 18"/>',
     "refresh": '<path d="M20 8a8 8 0 1 0 0 9M20 3v5h-5"/>',
@@ -251,11 +256,19 @@ def file_mime(rows):
     return mime
 
 
+def folder_name(text):
+    """A subject made safe to name a folder with."""
+    return "".join("_" if character in '<>:"/\\|?*' or ord(character) < 32 else character for character in text).strip(" .") or "Files"
+
+
 def load_results(core, args, offset=0, limit=PAGE_SIZE):
     """One page of results, explained, in the interface language."""
     page = core.search_page(**args, offset=offset, limit=limit)
     bodies = core.bodies(row["id"] for row in page["rows"]) if page["tokens"] else {}
     page["rows"] = explain_matches(page["rows"], bodies, args["query"])
+    links = core.linked_counts([row["id"] for row in page["rows"]])
+    for row in page["rows"]:
+        row["links"] = links.get(row["id"], 0)
     for row in page["rows"]:
         # With no text, the summary is a stored message rather than the file's own words.
         if not row.get("text") and row.get("summary"):
@@ -447,6 +460,11 @@ class FileDelegate(QStyledItemDelegate):
             painter.drawText(QRectF(r.right() - 150, r.y() + 32, 138, 19), Qt.AlignRight | Qt.AlignVCenter, date_text(row.get("mtime")))
         if row.get("favorite"):
             icon("star", ACCENT, 14).paint(painter, QRect(int(name_end + 6), int(r.y() + 12), 13, 13))
+            name_end += 22
+        if row.get("links"):
+            icon("link", ACCENT, 14).paint(painter, QRect(int(name_end + 8), int(r.y() + 12), 13, 13))
+            painter.setPen(QColor(TEXT_3))
+            painter.drawText(QRectF(name_end + 24, r.y() + 8, 30, 22), Qt.AlignVCenter, str(row["links"]))
 
 
 def version_tag(row):
@@ -702,6 +720,92 @@ class QuickSearch(QFrame):
         # A drag leaves the window without being finished with it.
         if event.type() == QEvent.ActivationChange and not self.isActiveWindow() and self.list.state() != QAbstractItemView.DraggingState:
             self.hide()
+
+
+class LinkPicker(QDialog):
+    """Pick files to tie together. Search and tick as many as you like, across searches."""
+
+    def __init__(self, archive, base=None, chosen=()):
+        super().__init__(archive)
+        self.core = archive.core
+        self.base = base
+        self.chosen = {row["id"]: row["name"] for row in chosen}
+        base_row = self.core.get_file(base) if base else None
+        self.setWindowTitle(t("Link files"))
+        self.setMinimumSize(520, 560)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 16)
+        layout.setSpacing(10)
+        layout.addWidget(label(t("Link {name} with", name=base_row["name"]) if base_row else t("Choose files to link"), "title"))
+        self.box = QLineEdit()
+        self.box.setPlaceholderText(t("Search for a file"))
+        self.box.textChanged.connect(self.fill)
+        self.box.returnPressed.connect(self.tick_first)
+        layout.addWidget(self.box)
+        self.heading = label("", "caption")
+        layout.addWidget(self.heading)
+        self.results = QListWidget()
+        self.results.itemChanged.connect(self.ticked)
+        self.results.itemClicked.connect(self.clicked)
+        layout.addWidget(self.results, 1)
+        end = QHBoxLayout()
+        self.summary = label("", "caption")
+        end.addWidget(self.summary, 1)
+        end.addWidget(button(t("Cancel"), self.reject, None, "quiet"))
+        self.confirm = button(t("Link"), self.accept, "link", "primary")
+        end.addWidget(self.confirm)
+        layout.addLayout(end)
+        self.fill()
+        self.box.setFocus()
+
+    def fill(self):
+        text = self.box.text().strip()
+        rows = []
+        if text:
+            self.heading.setText(t("Results"))
+            rows = [dict(row, why="") for row in self.core.search(text, limit=PICKER_ROWS)]
+        else:
+            offers = self.core.suggest_links(self.base, PICKER_ROWS) if self.base else []
+            self.heading.setText(t("Suggested") if offers else t("Recent files"))
+            rows = offers or [dict(row, why="") for row in self.core.search("", limit=PICKER_ROWS)]
+        linked = {row["id"] for row in self.core.bundle(self.base)} if self.base else set()
+        self.results.blockSignals(True)
+        self.results.clear()
+        for row in rows:
+            if row["id"] == self.base or row["id"] in linked:
+                continue
+            item = QListWidgetItem(f"{row['name']}   ·   {t(row['why'])}" if row.get("why") else row["name"])
+            item.setData(Qt.UserRole, (row["id"], row["name"]))
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if row["id"] in self.chosen else Qt.Unchecked)
+            self.results.addItem(item)
+        self.results.blockSignals(False)
+        self.update_summary()
+
+    def clicked(self, item):
+        """A click anywhere on the row counts, since the box itself is small."""
+        item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
+
+    def ticked(self, item):
+        file_id, name = item.data(Qt.UserRole)
+        if item.checkState() == Qt.Checked:
+            self.chosen[file_id] = name
+        else:
+            self.chosen.pop(file_id, None)
+        self.update_summary()
+
+    def tick_first(self):
+        if self.results.count():
+            self.clicked(self.results.item(0))
+            self.box.selectAll()
+
+    def update_summary(self):
+        count = len(self.chosen) + (1 if self.base else 0)
+        self.summary.setText(t("{files} selected", files=file_count(len(self.chosen))))
+        self.confirm.setEnabled(count >= 2)
+
+    def ids(self):
+        return ([self.base] if self.base else []) + list(self.chosen)
 
 
 class Island(QFrame):
@@ -986,6 +1090,7 @@ class ArchiveWindow(QMainWindow):
         self.signals.sorted.connect(self.finish_sorting)
         self.assistant = None
         self.assistant_greeted = False
+        self.last_sorted = []
         self.scan_partial = False
         self.sorting = []
         self.ocr_thread = None
@@ -1089,6 +1194,7 @@ class ArchiveWindow(QMainWindow):
         self.pages.addWidget(self.grid)
         self.pages.addWidget(self.list)
         self.pages.addWidget(self.build_empty_page())
+        self.pages.addWidget(self.build_links_page())
         self.splitter.addWidget(self.content)
         self.build_details()
         self.splitter.addWidget(self.details)
@@ -1123,7 +1229,7 @@ class ArchiveWindow(QMainWindow):
         nav.addWidget(subtitle)
         nav.addSpacing(22)
         self.nav_buttons = {}
-        for place, title, glyph in (("all", "All files", "grid"), ("used", "Recently used", "external"), ("recent", "Last 7 days", "clock"), ("favorites", "Favorites", "star")):
+        for place, title, glyph in (("all", "All files", "grid"), ("used", "Recently used", "external"), ("recent", "Last 7 days", "clock"), ("favorites", "Favorites", "star"), ("links", "Links", "link")):
             self.add_nav(nav, place, t(title), glyph)
         nav.addSpacing(16)
         # Folders vary in number, so this part scrolls on a short window.
@@ -1307,12 +1413,200 @@ class ArchiveWindow(QMainWindow):
         layout.addStretch()
         return self.empty
 
+    def build_links_page(self):
+        self.links_page = QWidget()
+        self.links_page.setObjectName("content")
+        layout = QVBoxLayout(self.links_page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        tools = QHBoxLayout()
+        tools.setSpacing(8)
+        self.map_find = QLineEdit()
+        self.map_find.setPlaceholderText(t("Find on this board"))
+        self.map_find.setClearButtonEnabled(True)
+        self.map_find.setMaximumWidth(280)
+        self.map_find.textChanged.connect(self.find_on_map)
+        self.map_find.returnPressed.connect(self.go_to_match)
+        tools.addWidget(self.map_find)
+        tools.addWidget(label(t("Drag one file onto another to link them. Double-click to open."), "caption"), 1)
+        tools.addWidget(button(t("Show all"), lambda: self.map.fit(), "grid", "quiet"))
+        tools.addWidget(button(t("Link files"), lambda: self.link_files(), "link", "primary"))
+        layout.addLayout(tools)
+        self.map_pages = QStackedWidget()
+        self.map = LinkBoard(self.covers)
+        self.covers.ready.connect(self.map.update)
+        self.map.cut_hint = t("Right-click to remove this link")
+        self.map.drop_hint = t("Release to link")
+        self.map.offers_title = t("Might belong here")
+        self.map.describe = lambda row: (str(row.get("ext", "")).lstrip(".").upper() or t("File"), date_text(row.get("mtime")))
+        self.map.title_of = lambda name, count: t("{name} and {count} more", name=name, count=count - 1)
+        self.map.set_reduced_motion(self.reduced_motion)
+        self.map.selected.connect(self.select_file)
+        self.map.opened.connect(self.open_file)
+        self.map.tied.connect(lambda one, other: self.tie([one, other]))
+        self.map.offer_taken.connect(lambda one, other: self.tie([one, other]))
+        self.map.untied.connect(self.offer_untie)
+        self.map.menu_requested.connect(self.show_file_menu)
+        self.map_pages.addWidget(self.map)
+        waiting = QWidget()
+        column = QVBoxLayout(waiting)
+        column.addStretch()
+        for text, name in ((t("Link the files that belong together"), "title"),
+                           (t("A quote, its contract and the photos from site: link them once, and finding one finds them all."), "hint"),
+                           (t("Select files in any list and press Ctrl+L, or right-click a file and choose Link."), "hint")):
+            line = label(text, name)
+            line.setAlignment(Qt.AlignCenter)
+            line.setWordWrap(True)
+            column.addWidget(line)
+        column.addSpacing(14)
+        row = QHBoxLayout()
+        row.addStretch()
+        row.addWidget(button(t("Link files"), lambda: self.link_files(), "link", "primary"))
+        row.addStretch()
+        column.addLayout(row)
+        column.addStretch()
+        self.map_pages.addWidget(waiting)
+        layout.addWidget(self.map_pages, 1)
+        return self.links_page
+
+    def show_map(self):
+        graph = self.core.link_graph()
+        self.map.set_graph(graph["nodes"], graph["edges"])
+        self.map_pages.setCurrentIndex(0 if graph["nodes"] else 1)
+        self.pages.setCurrentWidget(self.links_page)
+        self.section_title.setText(t("Links"))
+        self.section_title.show()
+        self.result_count.setText(t("{files} linked", files=file_count(len(graph["nodes"]))))
+        self.result_count.show()
+        self.collect_all.hide()
+        self.clear_filters.hide()
+        if self.selected_id:
+            self.point_map_at(self.selected_id)
+
+    def point_map_at(self, file_id):
+        """Shows a file's group, and what might belong in it, with nothing tied until someone says so."""
+        if file_id not in self.map.nodes:
+            self.map.focus(None)
+            return
+        self.map.set_offers([dict(offer, why_text=t(offer["why"])) for offer in self.core.suggest_links(file_id, MAP_OFFERS)])
+        self.map.focus(file_id, centred=True)
+
+    def find_on_map(self, text):
+        text = text.strip()
+        self.map.set_matches([row["id"] for row in self.core.search(text, limit=300)] if text else None)
+
+    def go_to_match(self):
+        found = sorted(self.map.matches or ())
+        if found:
+            self.select_file(found[0])
+
+    def tie(self, file_ids):
+        """Ties files together and shows the result wherever the person is."""
+        ids = list(dict.fromkeys(file_ids))
+        if len(ids) < 2:
+            return
+        self.core.link(ids)
+        self.links_changed()
+        self.show_status(t("Linked {files}", files=file_count(len(ids))), 4)
+
+    def links_changed(self):
+        if self.place == "links":
+            self.show_map()
+        else:
+            self.refresh_results()
+        if self.selected_id:
+            row = self.core.get_file(self.selected_id)
+            if row:
+                self.show_linked(row)
+
+    def link_files(self, base=None, chosen=()):
+        picker = LinkPicker(self, base, chosen)
+        if picker.exec() == QDialog.Accepted:
+            self.tie(picker.ids())
+        picker.deleteLater()
+
+    def link_selection(self):
+        rows = self.selected_rows()
+        if len(rows) > 1:
+            self.tie([row["id"] for row in rows])
+        elif self.selected_id:
+            self.link_files(self.selected_id)
+        else:
+            self.link_files()
+
+    def active_view(self):
+        return {"grid": self.grid, "list": self.list}.get(self.view_mode)
+
+    def selected_rows(self):
+        """The files picked in the list or grid, or just the one being looked at."""
+        view = self.active_view()
+        rows = [index.data(Qt.UserRole) for index in view.selectionModel().selectedIndexes()] if view else []
+        if len(rows) > 1:
+            return rows
+        row = self.core.get_file(self.selected_id) if self.selected_id else None
+        return [row] if row else []
+
+    def offer_untie(self, one, other):
+        menu = QMenu(self)
+        menu.addAction(t("Remove this link"), lambda: self.untie(one, other))
+        popup(menu, QCursor.pos())
+
+    def untie(self, one, other):
+        self.core.unlink(one, other)
+        self.links_changed()
+
+    def untie_all(self, file_id):
+        self.core.unlink_all(file_id)
+        self.links_changed()
+
+    def show_linked(self, row):
+        """The files tied to this one, and what can be done with all of them at once."""
+        clear_layout(self.linked)
+        direct = self.core.links_of(row["id"])
+        head = QHBoxLayout()
+        head.setSpacing(4)
+        head.addWidget(label(t("Linked files"), "caption"))
+        head.addStretch()
+        head.addWidget(button(t("Link a file"), lambda: self.link_files(row["id"]), "plus", "quiet"))
+        self.linked.addLayout(head)
+        if not direct:
+            return
+        for item in direct[:MAX_LINKS_SHOWN]:
+            name = self.path_label.fontMetrics().elidedText(item["name"], Qt.ElideMiddle, 260)
+            choice = button(name, lambda checked=False, i=item["id"]: self.select_file(i), "link", "quiet")
+            choice.setStyleSheet("text-align:left;")
+            self.linked.addWidget(choice)
+        family = self.core.bundle(row["id"])
+        if len(direct) > MAX_LINKS_SHOWN:
+            self.linked.addWidget(label(t("and {count} more", count=len(direct) - MAX_LINKS_SHOWN), "caption"))
+        actions = QHBoxLayout()
+        actions.setSpacing(2)
+        actions.addWidget(button(t("Copy all ({count})", count=len(family)), lambda: self.copy_rows(self.core.bundle(row["id"])), "copy", "quiet"))
+        actions.addWidget(button(t("Save as collection"), lambda: self.new_collection([item["id"] for item in self.core.bundle(row["id"])]), "book", "quiet"))
+        if self.place != "links":
+            actions.addWidget(button(t("See on board"), lambda: self.see_on_map(row["id"]), "link", "quiet"))
+        actions.addStretch()
+        self.linked.addLayout(actions)
+
+    def see_on_map(self, file_id):
+        self.selected_id = file_id
+        self.select_place("links")
+
+    def copy_rows(self, rows):
+        mime = file_mime(rows)
+        if not mime:
+            self.show_status(t("File unavailable"))
+            return False
+        QApplication.clipboard().setMimeData(mime)
+        self.show_status(t("{files} copied. Paste them into a chat, an email or a folder.", files=file_count(len(mime.urls()))), 5)
+        return True
+
     def make_view(self, mode):
         view = GridView() if mode == "grid" else QListView()
         view.setModel(self.model)
         view.setItemDelegate(FileDelegate(mode, self.covers, view))
         view.setMouseTracking(True)
-        view.setSelectionMode(QAbstractItemView.SingleSelection)
+        view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         if mode == "grid":
             view.setViewMode(QListView.IconMode)
@@ -1376,6 +1670,11 @@ class ArchiveWindow(QMainWindow):
         self.versions.setSpacing(0)
         self.version_panel.hide()
         detail.addWidget(self.version_panel)
+        self.linked_panel = QWidget()
+        self.linked = QVBoxLayout(self.linked_panel)
+        self.linked.setContentsMargins(0, 0, 0, 0)
+        self.linked.setSpacing(0)
+        detail.addWidget(self.linked_panel)
         self.preview_table = table_widget([[""]])
         self.preview_table.hide()
         detail.addWidget(self.preview_table, 1)
@@ -1404,6 +1703,10 @@ class ArchiveWindow(QMainWindow):
         bottom_actions.addWidget(button("", self.copy_path, "copy", "quiet"))
         bottom_actions.itemAt(3).widget().setToolTip(t("Copy path"))
         bottom_actions.itemAt(3).widget().setAccessibleName(t("Copy path"))
+        self.put_back_button = button(t("Put back"), self.put_back, "back", "quiet")
+        self.put_back_button.setToolTip(t("Return this file to the folder it came from"))
+        self.put_back_button.hide()
+        bottom_actions.addWidget(self.put_back_button)
         bottom_actions.addStretch()
         detail.addLayout(bottom_actions)
 
@@ -1417,16 +1720,18 @@ class ArchiveWindow(QMainWindow):
             shortcut.activated.connect(callback)
             self.shortcuts.append(shortcut)
         for view in (self.grid, self.list, self.deck):
-            shortcut = QShortcut(QKeySequence("Space"), view)
-            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
-            shortcut.activated.connect(self.open_preview)
-            self.shortcuts.append(shortcut)
+            for key, callback in (("Space", self.open_preview), ("Ctrl+L", self.link_selection)):
+                shortcut = QShortcut(QKeySequence(key), view)
+                shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+                shortcut.activated.connect(callback)
+                self.shortcuts.append(shortcut)
 
     def eventFilter(self, watched, event):
         """Arrow keys move between the search box and the results."""
         if event.type() == QEvent.KeyPress:
             if event.matches(QKeySequence.Copy) and watched in (self.grid, self.list, self.deck):
-                self.copy_file()
+                rows = self.selected_rows()
+                self.copy_rows(rows) if len(rows) > 1 else self.copy_file()
                 return True
             if watched is self.search and event.key() == Qt.Key_Down:
                 return self.focus_results()
@@ -1750,6 +2055,14 @@ class ArchiveWindow(QMainWindow):
 
     def refresh_results(self, *args):
         query = self.search.text().strip()
+        if self.place == "links":
+            if not query:
+                self.filter_row.hide()
+                self.show_map()
+                return
+            self.place = "all"  # Searching means looking through everything.
+            self.refresh_stats()
+        self.filter_row.show()
         parsed = parse_query(query)
         sort = self.sort.currentData()
         previous = self.search_args
@@ -1872,6 +2185,7 @@ class ArchiveWindow(QMainWindow):
     def set_reduced_motion(self, checked):
         self.reduced_motion = checked
         self.deck.set_reduced_motion(checked)
+        self.map.set_reduced_motion(checked)
         if self.assistant:
             self.assistant.reduced_motion = checked
         self.config["reduced_motion"] = checked
@@ -1915,6 +2229,8 @@ class ArchiveWindow(QMainWindow):
         path = readable_path(row)
         self.update_availability(row, path)
         self.show_versions(row)
+        self.show_linked(row)
+        self.put_back_button.setVisible(bool(self.core.moved_from(file_id)))
         pix = preview_pixmap(row, 340, 300) if path and (row.get("kind") == "Image" or row.get("ext") == ".pdf") else None
         self.preview_image.setVisible(pix is not None)
         if pix is not None:
@@ -1936,6 +2252,8 @@ class ArchiveWindow(QMainWindow):
         if self.splitter.sizes()[1] < 280:
             self.splitter.setSizes([max(400, self.splitter.width() - 345), 345])
         self.show_status("")
+        if self.place == "links":
+            self.point_map_at(file_id)
 
     def show_versions(self, row):
         family = self.core.versions(row.get("version_key"))
@@ -2161,9 +2479,24 @@ class ArchiveWindow(QMainWindow):
             QMessageBox.information(self, t("Location unavailable"), t("Connect the disk that holds this file."))
 
     def list_menu(self, view, position):
-        row = view.indexAt(position).data(Qt.UserRole)
-        if row:
-            self.show_file_menu(row["id"], view.viewport().mapToGlobal(position))
+        index = view.indexAt(position)
+        row = index.data(Qt.UserRole)
+        if not row:
+            return
+        picked = [item.data(Qt.UserRole) for item in view.selectionModel().selectedIndexes()]
+        where = view.viewport().mapToGlobal(position)
+        if len(picked) > 1 and view.selectionModel().isSelected(index):
+            popup(self.many_menu(picked), where)
+        else:
+            self.show_file_menu(row["id"], where)
+
+    def many_menu(self, rows):
+        ids = [row["id"] for row in rows]
+        menu = QMenu(self)
+        menu.addAction(t("Link these {files}", files=file_count(len(ids))), lambda: self.tie(ids))
+        menu.addAction(t("Copy these {files}", files=file_count(len(ids))), lambda: self.copy_rows(rows))
+        self.collection_choices(menu.addMenu(t("Add to collection")), ids, set())
+        return menu
 
     def file_menu(self, file_id):
         self.select_file(file_id)
@@ -2181,7 +2514,24 @@ class ArchiveWindow(QMainWindow):
         self.collection_choices(menu.addMenu(t("Add to collection")), [file_id], self.core.collections_of(file_id))
         if self.place.startswith("collection:"):
             menu.addAction(t("Remove from this collection"), lambda: self.leave_collection(int(self.place[11:]), file_id))
+        menu.addSeparator()
+        menu.addAction(t("Link a file"), lambda: self.link_files(file_id))
+        if self.core.links_of(file_id):
+            menu.addAction(t("Remove all its links"), lambda: self.untie_all(file_id))
+        if self.core.moved_from(file_id):
+            menu.addAction(t("Put back"), lambda: self.put_back(file_id))
         return menu
+
+    def put_back(self, file_id=None):
+        file_id = file_id if isinstance(file_id, int) and not isinstance(file_id, bool) else self.selected_id
+        try:
+            self.core.move_back(file_id)
+        except (ValueError, OSError) as exc:
+            QMessageBox.information(self, t("Put back"), t(str(exc)))
+            return
+        self.refresh()
+        self.select_file(file_id)
+        self.show_status(t("Back in its original folder"), 5)
 
     def show_file_menu(self, file_id, position):
         popup(self.file_menu(file_id), position)
@@ -2506,6 +2856,8 @@ class ArchiveWindow(QMainWindow):
             choice.setCheckable(True)
             choice.setChecked(self.assistant.size_name == name)
         menu.addSeparator()
+        if len(self.last_sorted) > 1:
+            menu.addAction(t("Link the {files} I just sorted", files=file_count(len(self.last_sorted))), lambda: self.tie(self.last_sorted))
         menu.addAction(t("Hide {name}", name=t("Roo")), lambda: self.show_assistant(False))
         return menu
 
@@ -2565,7 +2917,7 @@ class ArchiveWindow(QMainWindow):
         self.assistant.set_mood("happy", 2)
 
     def organise_drop(self, paths):
-        """Files handed to the assistant: read them, then group them. Originals never move."""
+        """Files handed to the assistant: read them, then group them. They move only if that was chosen."""
         self.assistant.set_mood("working")
         self.assistant.say(t("Let me have a look..."), 60)
         worker = threading.Thread(target=self.sort_dropped, args=(self.core, paths), daemon=True, name="sorting")
@@ -2573,8 +2925,9 @@ class ArchiveWindow(QMainWindow):
         worker.start()
 
     def sort_dropped(self, core, paths):
+        moving = self.config.get("drop_action") == "move"
         try:
-            only = core.adopt(paths)
+            only = core.adopt(paths, "index" if moving else "copy")
             while not self.ocr_stop.is_set():
                 try:
                     core.scan_all(cancel=self.ocr_stop, only=only)
@@ -2587,7 +2940,10 @@ class ArchiveWindow(QMainWindow):
                     if self.ocr_stop.is_set():
                         break
                     self.read_one(core, row)
-            result = self.sort_rows(core, core.files_at(paths))
+            rows = core.files_at(paths)
+            result = self.sort_rows(core, rows)
+            if moving:
+                result.update(self.move_sorted(core, paths, rows, result["topics"]))
         except Exception as exc:  # Whatever it was, Roo must not stay stuck working.
             result = {"problem": str(exc)}
         try:
@@ -2599,14 +2955,31 @@ class ArchiveWindow(QMainWindow):
     def sort_rows(core, rows):
         """Each file goes to a collection named for its subject, or its type if that is unclear."""
         english = language() == "en"
-        groups = {}
+        groups, topics = {}, {}
         for row in rows:
             topic = topic_of(row["name"], english) or topic_of(row["text"][:SORT_TEXT_CHARS], english) or t(file_group(row["ext"]))
             groups.setdefault(topic, []).append(row["id"])
+            topics[row["id"]] = topic
         existing = {row["name"].casefold(): row["id"] for row in core.collections()}
         for name, ids in groups.items():
             core.collect(existing.get(name.casefold()) or core.create_collection(name), ids)
-        return {"groups": {name: len(ids) for name, ids in groups.items()}, "files": len(rows)}
+        return {"groups": {name: len(ids) for name, ids in groups.items()}, "files": len(rows), "topics": topics, "ids": [row["id"] for row in rows]}
+
+    def library_folder(self):
+        return Path(self.config.get("library_folder") or BASE / "library")
+
+    def move_sorted(self, core, paths, rows, topics):
+        """Last of all, so reading and sorting are done before anything leaves its folder.
+
+        A loose file goes under its subject. A folder keeps its shape.
+        """
+        folders = [Path(path) for path in paths if Path(path).is_dir()]
+        moves = []
+        for row in rows:
+            place = Path(row["path"])
+            holder = next((folder for folder in folders if place.is_relative_to(folder)), None)
+            moves.append((row["id"], Path(holder.name) / place.relative_to(holder) if holder else Path(folder_name(topics[row["id"]])) / place.name))
+        return core.move_files(moves, self.library_folder(), folders)
 
     def finish_sorting(self, result):
         if self.sorting:
@@ -2624,7 +2997,13 @@ class ArchiveWindow(QMainWindow):
             return
         self.assistant.set_mood("happy", 3)
         names = "、".join(f"“{name}”" for name in list(groups)[:3]) if language() == "zh" else ", ".join(f'"{name}"' for name in list(groups)[:3])
-        self.assistant.say(t("Sorted {files} into {names}. The originals stayed put.", files=file_count(result["files"]), names=names), 6)
+        self.last_sorted = result.get("ids", [])
+        if "moved" not in result:
+            self.assistant.say(t("Sorted {files} into {names}. The originals stayed put.", files=file_count(result["files"]), names=names), 6)
+        elif result["problems"]:
+            self.assistant.say(t("Moved {files} into your library. {count} could not move and stayed where they were.", files=file_count(len(result["moved"])), count=len(result["problems"])), 8)
+        else:
+            self.assistant.say(t("Moved {files} into your library, sorted into {names}.", files=file_count(len(result["moved"])), names=names), 6)
 
     def stop_background(self):
         if self.assistant:
@@ -2738,6 +3117,36 @@ class ArchiveWindow(QMainWindow):
         if choice.currentData() != language():
             self.apply_language(choice.currentData())
 
+    def add_drop_settings(self, layout):
+        layout.addWidget(label(t("Files you drop on {name}", name=t("Roo")), "caption"))
+        action = QComboBox()
+        for value, title in (("copy", "Keep a copy, and leave the originals where they are"), ("move", "Move them into my library")):
+            action.addItem(t(title), value)
+        action.setCurrentIndex(action.findData(self.config.get("drop_action", "copy")))
+        layout.addWidget(action)
+        where = label("", "caption")
+        where.setWordWrap(True)
+        where.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(where)
+        change = button(t("Choose library folder"), None, "folder", "quiet")
+        layout.addWidget(change, 0, Qt.AlignLeft)
+        def show():
+            moving = action.currentData() == "move"
+            where.setText(t("They leave their folder for {path}, sorted by subject. You can put any of them back from its details.", path=str(self.library_folder())) if moving
+                          else t("A copy is saved in the archive, so a file stays safe even if the original is deleted."))
+            change.setVisible(moving)
+        def picked():
+            self.save_setting("drop_action", action.currentData())
+            show()
+        def choose():
+            chosen = QFileDialog.getExistingDirectory(self, t("Choose library folder"), str(self.library_folder()))
+            if chosen:
+                self.save_setting("library_folder", chosen)
+                show()
+        action.currentIndexChanged.connect(picked)
+        change.clicked.connect(choose)
+        show()
+
     def add_background_settings(self, layout):
         layout.addWidget(label(t("Quick search shortcut"), "caption"))
         shortcut = QKeySequenceEdit(QKeySequence(self.config.get("hotkey", DEFAULT_HOTKEY)))
@@ -2756,6 +3165,7 @@ class ArchiveWindow(QMainWindow):
         roo.setChecked(self.config.get("assistant", True))
         roo.toggled.connect(self.show_assistant)
         layout.addWidget(roo)
+        self.add_drop_settings(layout)
         island = QCheckBox(t("Show new files at the top of the screen"))
         island.setChecked(self.config.get("island", True))
         island.toggled.connect(lambda checked: self.save_setting("island", checked))
