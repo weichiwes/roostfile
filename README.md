@@ -198,6 +198,14 @@ A first scan takes longer on Windows because antivirus software checks each file
 
 Reading the words in 216 simulated photos and scans took 30 seconds in the background, with the interface never held up for more than 37 ms.
 
+## Author
+
+Made by 未弛 Wes.
+
+- YouTube: [未弛 Wes](https://www.youtube.com/channel/UC8lBHxdII_tXiCGd9Y5lNbg)
+- X (Twitter): [@weichiwes](https://x.com/weichiwes)
+- GitHub: [weichiwes](https://github.com/weichiwes)
+
 ## License
 
 [MIT](LICENSE). The packages Roostfile depends on keep their own licenses, listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

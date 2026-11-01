@@ -155,6 +155,14 @@ python3 -m pip install --target .vendor -r requirements-ui.txt
 
 开发说明见 [README.md](README.md#development)，用户和使用场景见 [docs/users.md](docs/users.md)。代码、注释和界面源文案都使用英文，中文译文放在 `i18n.py` 的 `ZH` 中。
 
+## 作者
+
+由未弛 Wes 制作。
+
+- YouTube：[未弛 Wes](https://www.youtube.com/channel/UC8lBHxdII_tXiCGd9Y5lNbg)
+- 推特：[@weichiwes](https://x.com/weichiwes)
+- GitHub：[weichiwes](https://github.com/weichiwes)
+
 ## 许可证
 
 [MIT](LICENSE)。依赖的第三方软件保留各自的许可证，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
