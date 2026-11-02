@@ -8,6 +8,7 @@ import struct
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -77,6 +78,37 @@ class MacTests(unittest.TestCase):
                 self.assertTrue(saved["RunAtLoad"])
                 background.set_autostart(False, "")
                 self.assertFalse(background.autostart_enabled())
+
+
+class BusyTests(unittest.TestCase):
+    SCREEN = (0, 0, 2560, 1440)
+
+    def busy(self, state, front_fills=False):
+        def report(pointer):
+            pointer._obj.value = state
+            return 0
+        windll = SimpleNamespace(shell32=SimpleNamespace(SHQueryUserNotificationState=report))
+        with patch.object(background.os, "name", "nt"), patch.object(background.ctypes, "windll", windll, create=True), \
+                patch.object(background, "front_window_fills_screen", return_value=front_fills):
+            return background.user_is_busy()
+
+    def test_a_game_or_presentation_keeps_things_out_of_the_way(self):
+        self.assertFalse(self.busy(5))
+        self.assertTrue(self.busy(3))
+        self.assertTrue(self.busy(4))
+        self.assertTrue(self.busy(2, front_fills=True))
+
+    def test_a_window_over_the_screen_that_is_not_in_front_does_not_count(self):
+        self.assertFalse(self.busy(2))
+
+    def test_only_a_window_covering_the_whole_screen_counts_as_full_screen(self):
+        self.assertTrue(background.fills_screen("UnrealWindow", self.SCREEN, self.SCREEN))
+        self.assertTrue(background.fills_screen("Chrome_WidgetWin_1", (-1, -1, 2561, 1441), self.SCREEN))
+        self.assertFalse(background.fills_screen("Chrome_WidgetWin_1", (-8, -8, 2568, 1392), self.SCREEN))  # Maximised, above the taskbar.
+
+    def test_the_desktop_and_a_remote_desktop_are_not_someone_watching(self):
+        for name in ("Progman", "WorkerW", "TscShellContainerClass"):
+            self.assertFalse(background.fills_screen(name, self.SCREEN, self.SCREEN), name)
 
 
 class ChangeListTests(unittest.TestCase):

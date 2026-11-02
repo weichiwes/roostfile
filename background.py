@@ -54,6 +54,10 @@ INVALID_HANDLE = wintypes.HANDLE(-1).value
 NOTIFY_FILTER = 0x1 | 0x2 | 0x8 | 0x10
 WAIT_FOR_EVER = 0xFFFFFFFF
 BUFFER_BYTES = 64 * 1024
+QUNS_BUSY, QUNS_ACCEPTS_NOTIFICATIONS = 2, 5
+MONITOR_DEFAULTTONEAREST = 2
+# The desktop and a remote desktop fill the screen, and people are working in them, not watching.
+WORKSPACE_WINDOWS = {"Progman", "WorkerW", "TscShellContainerClass"}
 
 
 # macOS key codes follow keyboard position, not letters.
@@ -126,8 +130,43 @@ def user_is_busy() -> bool:
     if os.name != "nt":
         return False
     state = ctypes.c_int()
-    # 5 is QUNS_ACCEPTS_NOTIFICATIONS. Anything else means someone is occupied.
-    return ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) == 0 and state.value != 5
+    if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
+        return False
+    # Windows says QUNS_BUSY for any window over the whole screen, even a meeting's see-through
+    # sharing frame, so what counts is the window in front.
+    if state.value == QUNS_BUSY:
+        return front_window_fills_screen()
+    return state.value != QUNS_ACCEPTS_NOTIFICATIONS
+
+
+def fills_screen(class_name, window, screen) -> bool:
+    """Whether this window, as (left, top, right, bottom), is one someone is watching full screen."""
+    return class_name not in WORKSPACE_WINDOWS and window[0] <= screen[0] and window[1] <= screen[1] and window[2] >= screen[2] and window[3] >= screen[3]
+
+
+def front_window_fills_screen() -> bool:
+    window = foreground_window()
+    if not window:
+        return False
+    user32 = ctypes.windll.user32
+    user32.MonitorFromWindow.restype = wintypes.HMONITOR
+    user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+    user32.GetMonitorInfoW.argtypes = (wintypes.HMONITOR, ctypes.POINTER(_MonitorInfo))
+    user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+    user32.GetClassNameW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+    name = ctypes.create_unicode_buffer(64)
+    box = wintypes.RECT()
+    info = _MonitorInfo(size=ctypes.sizeof(_MonitorInfo))
+    if not user32.GetClassNameW(window, name, 64) or not user32.GetWindowRect(window, ctypes.byref(box)):
+        return False
+    if not user32.GetMonitorInfoW(user32.MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), ctypes.byref(info)):
+        return False
+    edges = lambda rect: (rect.left, rect.top, rect.right, rect.bottom)
+    return fills_screen(name.value, edges(box), edges(info.monitor))
+
+
+class _MonitorInfo(ctypes.Structure):
+    _fields_ = [("size", wintypes.DWORD), ("monitor", wintypes.RECT), ("work", wintypes.RECT), ("flags", wintypes.DWORD)]
 
 
 class _HotKeyId(ctypes.Structure):
