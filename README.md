@@ -47,6 +47,12 @@ For a different look per mood, choose **Use an image for each mood** and pick a 
 
 Roo steps aside during games and presentations, and can be hidden from her menu or from Settings. Reduce motion keeps her still.
 
+## Move your archive
+
+The archive starts in the `data` folder beside the app. To keep it somewhere else, choose **Change location** in Settings and pick a folder on this computer. Roostfile makes a `Roostfile` folder inside it, copies the database, saved copies and settings there, and switches only after checking the copy. Your original files do not move, and the old folder stays until you delete it.
+
+If the folder you pick already holds an archive, Roostfile asks whether to switch to it and never overwrites it. If the archive is on an external drive that is not connected at startup, Roostfile tells you instead of starting an empty one.
+
 ## Connect your own tools
 
 Roostfile includes a server for the [Model Context Protocol](https://modelcontextprotocol.io). In Settings, turn on **Let connected tools read this archive**, then choose **Copy setup for your tool** and paste the result into your tool's MCP settings. It looks like this:

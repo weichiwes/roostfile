@@ -873,6 +873,158 @@ class DesktopTests(unittest.TestCase):
             self.window.place_assistant()
         self.assertFalse(assistant.isVisible())
 
+    def movable_archive(self):
+        """A real archive, not the demo, in a folder of its own, with the app's folder in the scratch space too."""
+        scratch = Path(self.scratch)
+        patcher = patch.object(ui, "BASE", scratch)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        window = self.window
+        window.demo = False
+        window.data_root = scratch / "data"
+        window.core = ui.ArchiveCore(window.data_root)
+        window.config_file = window.data_root / "ui-state.json"
+        window.config = {"language": "zh", "assistant_size": "small"}
+        window.save_config()
+        return window
+
+    def choose_archive_folder(self, folder, answer=ui.QMessageBox.Yes):
+        """Runs the whole choice, and returns what was said at the end."""
+        window = self.window
+        with patch.object(ui.QFileDialog, "getExistingDirectory", return_value=str(folder)), \
+                patch.object(ui.QMessageBox, "question", return_value=answer) as asked, \
+                patch.object(ui.QMessageBox, "information") as told, patch.object(ui.QMessageBox, "warning") as warned:
+            window.change_archive_location()
+            while window.sorting:
+                self.app.processEvents()
+            self.app.processEvents()
+        return SimpleNamespace(asked=asked, told=told, warned=warned)
+
+    def test_the_archive_moves_to_a_chosen_folder_and_the_window_follows(self):
+        window = self.movable_archive()
+        (ui.BASE / "source").mkdir()
+        (ui.BASE / "source" / "合同.txt").write_text("一份合同", encoding="utf-8")
+        window.core.add_source(ui.BASE / "source", mode="copy")
+        window.core.scan_all()
+        old = window.data_root
+        outcome = self.choose_archive_folder(ui.BASE / "移动硬盘")
+        target = ui.BASE / "移动硬盘" / "Roostfile"
+        outcome.warned.assert_not_called()
+        self.assertEqual(window.core.data_dir, target)
+        self.assertEqual(window.data_root, target)
+        self.assertEqual(ui.data_location(ui.BASE), target)
+        self.assertEqual(window.config["assistant_size"], "small")
+        self.assertEqual(len(window.core.sources()), 1)
+        self.assertEqual(window.core.search_page(query="合同", limit=1)["rows"][0]["name"], "合同.txt")
+        window.save_setting("assistant_size", "large")
+        self.assertIn("large", (target / "ui-state.json").read_text(encoding="utf-8"))
+        self.assertIn("small", (old / "ui-state.json").read_text(encoding="utf-8"))
+        self.assertIn(str(old), outcome.told.call_args.args[2])
+        self.assertTrue(window.core.db_path.is_file())
+
+    def test_moving_the_archive_says_connected_tools_must_be_set_up_again(self):
+        window = self.movable_archive()
+        window.save_setting("mcp", True)
+        outcome = self.choose_archive_folder(ui.BASE / "新位置")
+        self.assertIn("重新复制设置", outcome.told.call_args.args[2])
+        self.assertEqual(json.loads(window.mcp_setup())["mcpServers"]["roostfile"]["args"][-1], str(ui.BASE / "新位置" / "Roostfile"))
+
+    def test_the_archive_stays_put_if_the_answer_is_no(self):
+        window = self.movable_archive()
+        self.choose_archive_folder(ui.BASE / "新位置", ui.QMessageBox.No)
+        self.assertEqual(window.data_root, ui.BASE / "data")
+        self.assertFalse((ui.BASE / "新位置" / "Roostfile").exists())
+        self.assertFalse((ui.BASE / "data-location.txt").exists())
+
+    def test_a_folder_holding_an_archive_is_switched_to_and_never_overwritten(self):
+        window = self.movable_archive()
+        other = ui.ArchiveCore(ui.BASE / "另一份")
+        (other.data_dir / "ui-state.json").write_text('{"language": "zh", "assistant_size": "large"}', encoding="utf-8")
+        before = other.db_path.read_bytes()
+        outcome = self.choose_archive_folder(other.data_dir)
+        self.assertEqual(window.core.data_dir, other.data_dir)
+        self.assertEqual(window.config["assistant_size"], "large")
+        self.assertIn(str(other.data_dir), outcome.asked.call_args.args[2])
+        self.assertEqual(len(before), other.db_path.stat().st_size)
+
+    def test_cancelling_stops_the_copy_and_keeps_the_archive(self):
+        window = self.movable_archive()
+        def copying(target, progress, cancel):
+            window.signals.copying.emit(.5)
+            return not cancel.wait(10)
+        with patch.object(ui.ArchiveCore, "copy_to", side_effect=copying), patch.object(ui.QMessageBox, "warning") as warned, patch.object(ui.QMessageBox, "information") as told:
+            window.copy_archive(ui.BASE / "新位置" / "Roostfile")
+            window.copy_box.findChild(ui.QPushButton).click()
+            while window.sorting:
+                self.app.processEvents()
+        warned.assert_not_called()
+        told.assert_not_called()
+        self.assertEqual(window.data_root, ui.BASE / "data")
+        self.assertFalse((ui.BASE / "data-location.txt").exists())
+
+    def test_the_window_keeps_the_cancel_flag_so_the_worker_never_drops_the_last_reference(self):
+        window = self.movable_archive()
+        for _ in range(30):  # This used to hang about one time in three on Windows.
+            with patch.object(ui.ArchiveCore, "copy_to", return_value=False):
+                window.copy_archive(ui.BASE / "新位置" / "Roostfile")
+                held = window.copy_cancel
+                while window.sorting:
+                    self.app.processEvents()
+            self.assertIs(window.copy_cancel, held)
+
+    def test_a_network_folder_is_refused_before_anything_looks_inside_it(self):
+        window = self.movable_archive()
+        with patch.object(ui, "archive_folder_in") as looked:
+            outcome = self.choose_archive_folder("\\\\server\\share")
+        looked.assert_not_called()
+        outcome.warned.assert_called_once()
+        self.assertEqual(window.data_root, ui.BASE / "data")
+
+    def test_a_failed_copy_leaves_the_archive_in_use(self):
+        window = self.movable_archive()
+        with patch.object(ui.ArchiveCore, "copy_to", side_effect=OSError("The disk is full")):
+            outcome = self.choose_archive_folder(ui.BASE / "新位置")
+        self.assertIn("The disk is full", outcome.warned.call_args.args[2])
+        self.assertEqual(window.data_root, ui.BASE / "data")
+        self.assertFalse((ui.BASE / "data-location.txt").exists())
+        self.assertFalse(window.ocr_stop.is_set())
+
+    def test_the_archive_cannot_move_during_an_update(self):
+        window = self.movable_archive()
+        window.scanning = True
+        with patch.object(ui.QFileDialog, "getExistingDirectory") as chooser, patch.object(ui.QMessageBox, "information") as told:
+            window.change_archive_location()
+        window.scanning = False
+        chooser.assert_not_called()
+        told.assert_called_once()
+
+    def test_settings_offer_a_new_location_outside_the_demo(self):
+        window = self.movable_archive()
+        def press():
+            box = self.app.activeModalWidget()
+            next(item for item in box.findChildren(ui.QPushButton) if item.text() == ui.t("Change location")).click()
+        ui.QTimer.singleShot(0, press)
+        with patch.object(window, "change_archive_location") as change:
+            window.show_settings()
+            self.app.processEvents()
+        change.assert_called_once()
+
+    def test_a_missing_archive_is_reported_instead_of_starting_empty(self):
+        self.movable_archive()
+        folder = ui.BASE / "拔掉的硬盘" / "Roostfile"
+        ui.remember_location(ui.BASE, folder)
+        with patch.object(ui.QMessageBox, "exec"), patch.object(ui.QMessageBox, "clickedButton", lambda box: next(item for item in box.buttons() if item.text() == t("Quit"))):
+            self.assertFalse(ui.find_archive())
+        self.assertFalse(folder.exists())
+        self.assertEqual(ui.data_location(ui.BASE), folder)
+
+    def test_a_missing_archive_can_be_left_for_the_default_folder(self):
+        self.movable_archive()
+        ui.remember_location(ui.BASE, ui.BASE / "拔掉的硬盘" / "Roostfile")
+        with patch.object(ui.QMessageBox, "exec"), patch.object(ui.QMessageBox, "clickedButton", lambda box: next(item for item in box.buttons() if item.text() == t("Use the default folder"))):
+            self.assertTrue(ui.find_archive())
+        self.assertEqual(ui.data_location(ui.BASE), ui.BASE / "data")
+
     def test_it_can_be_turned_off(self):
         assistant = self.assistant()
         with patch.object(ui, "user_is_busy", return_value=False):

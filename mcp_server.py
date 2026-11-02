@@ -15,7 +15,7 @@ import sys
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE))
 from offline import enforce_offline
-from core import ArchiveCore
+from core import ArchiveCore, data_location
 
 NAME = "roostfile"
 VERSION = "0.1.0"
@@ -205,7 +205,7 @@ def serve(data_dir, incoming=None, outgoing=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", type=Path, default=BASE / "data", help="The archive folder")
+    parser.add_argument("--data", type=Path, default=data_location(BASE), help="The archive folder")
     args = parser.parse_args()
     enforce_offline()
     sys.stdin.reconfigure(encoding="utf-8", errors="replace")

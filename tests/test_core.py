@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 from pathlib import Path
 import shutil
@@ -1397,6 +1398,85 @@ nas:/export on /Volumes/my files (nfs, nodev)
         row = self.core.get_file(self.core.search_page(limit=1)["rows"][0]["id"])
         self.assertTrue(row["archive_path"].startswith(str(self.core.data_dir)))
         self.assertTrue(Path(row["archive_path"]).is_file())
+
+    def test_the_archive_stays_beside_the_app_until_another_place_is_chosen(self):
+        app = self.base / "程序"
+        app.mkdir()
+        self.assertEqual(core_module.data_location(app), app / "data")
+        core_module.remember_location(app, self.base / "移动硬盘" / "Roostfile")
+        self.assertEqual(core_module.data_location(app), self.base / "移动硬盘" / "Roostfile")
+        core_module.forget_location(app)
+        self.assertEqual(core_module.data_location(app), app / "data")
+
+    def test_a_picked_folder_gets_a_folder_of_its_own_unless_it_is_already_an_archive(self):
+        self.assertEqual(core_module.archive_folder_in(self.source), self.source / "Roostfile")
+        self.assertEqual(core_module.archive_folder_in(self.core.data_dir), self.core.data_dir)
+
+    def test_a_new_folder_must_be_outside_the_archive_and_hold_nothing_else(self):
+        self.write("Roostfile/合同.txt", "甲")
+        for folder in (self.source / "Roostfile", self.core.data_dir, self.core.data_dir / "vault"):
+            with self.assertRaises(ValueError):
+                self.core.check_new_folder(folder)
+        (self.base / "空").mkdir()
+        self.assertEqual(self.core.check_new_folder(self.base / "空"), self.base / "空")
+        self.assertEqual(self.core.check_new_folder(self.base / "还没有"), self.base / "还没有")
+
+    def saved_archive(self):
+        self.write("甲.txt", "一份合同")
+        self.core.add_source(self.source, mode="copy")
+        self.core.scan_all()
+        (self.core.data_dir / "ui-state.json").write_text('{"language": "zh"}', encoding="utf-8")
+        (self.core.data_dir / "assistant").mkdir()
+        (self.core.data_dir / "assistant" / "idle.png").write_bytes(b"picture")
+
+    def test_a_copy_holds_everything_and_finds_its_saved_copies(self):
+        self.saved_archive()
+        target = self.base / "新位置" / "Roostfile"
+        shares = []
+        self.assertTrue(self.core.copy_to(target, shares.append))
+        self.assertEqual(shares[-1], 1.0)
+        self.assertEqual(shares, sorted(shares))
+        self.assertFalse(target.with_name("Roostfile.moving").exists())
+        self.assertEqual((target / "assistant" / "idle.png").read_bytes(), b"picture")
+        self.assertEqual(json.loads((target / "ui-state.json").read_text(encoding="utf-8")), {"language": "zh"})
+        copy = ArchiveCore(target)
+        row = copy.get_file(copy.search_page(query="合同", limit=1)["rows"][0]["id"])
+        self.assertTrue(row["archive_path"].startswith(str(target)))
+        self.assertTrue(Path(row["archive_path"]).is_file())
+        self.assertTrue(self.core.db_path.is_file())  # The old folder is left for its owner to delete.
+
+    def test_sqlite_side_files_are_not_copied_as_files(self):
+        self.saved_archive()
+        (self.core.data_dir / "archive.sqlite3-shm").write_bytes(b"left over")
+        target = self.base / "新位置" / "Roostfile"
+        self.assertTrue(self.core.copy_to(target))
+        self.assertFalse((target / "archive.sqlite3-shm").exists())
+
+    def test_a_cancelled_copy_leaves_nothing_behind(self):
+        self.saved_archive()
+        target = self.base / "新位置" / "Roostfile"
+        stop = threading.Event()
+        stop.set()
+        self.assertFalse(self.core.copy_to(target, cancel=stop))
+        self.assertFalse(target.exists())
+        self.assertFalse(target.with_name("Roostfile.moving").exists())
+
+    def test_a_copy_that_would_not_fit_is_refused(self):
+        self.saved_archive()
+        target = self.base / "新位置" / "Roostfile"
+        with patch.object(core_module.shutil, "disk_usage", return_value=SimpleNamespace(free=10)):
+            with self.assertRaisesRegex(ValueError, "free space"):
+                self.core.copy_to(target)
+        self.assertFalse(target.with_name("Roostfile.moving").exists())
+
+    def test_a_copy_that_comes_out_different_never_gets_its_real_name(self):
+        self.saved_archive()
+        target = self.base / "新位置" / "Roostfile"
+        with patch.object(core_module.shutil, "copy2", side_effect=lambda source, copied: Path(copied).write_bytes(b"")):
+            with self.assertRaisesRegex(ValueError, "did not match"):
+                self.core.copy_to(target)
+        self.assertFalse(target.exists())
+        self.assertFalse(target.with_name("Roostfile.moving").exists())
 
     def test_a_scan_reports_files_going_and_coming_back(self):
         path = self.source / "甲.txt"

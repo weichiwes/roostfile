@@ -10,7 +10,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import csv
 import hashlib
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import errno
 import html
 import io
@@ -41,6 +41,8 @@ MAX_XML_TOTAL = 48 * 1024 * 1024
 MAX_BUNDLE = 500
 MAX_GRAPH_LINKS = 2000
 NEARBY_SECONDS = 3600
+ARCHIVE_FILE = "archive.sqlite3"
+LOCATION_FILE = "data-location.txt"
 
 TEXT_EXTS = {
     ".txt", ".md", ".markdown", ".csv", ".tsv", ".log", ".rst", ".tex",
@@ -665,11 +667,49 @@ _SCHEMA = """
 """
 
 
+class _Stopped(Exception):
+    pass
+
+
+def data_location(base):
+    """Where the archive is kept: beside the app, unless someone chose another place in Settings."""
+    try:
+        chosen = (Path(base) / LOCATION_FILE).read_text(encoding="utf-8").strip()
+    except OSError:
+        chosen = ""
+    return Path(chosen) if chosen else Path(base) / "data"
+
+
+def remember_location(base, folder):
+    """Kept beside the app, because it cannot live in the folder it points to."""
+    path = Path(base) / LOCATION_FILE
+    written = path.with_name(path.name + ".new")
+    written.write_text(str(folder), encoding="utf-8")
+    os.replace(written, path)
+
+
+def forget_location(base):
+    (Path(base) / LOCATION_FILE).unlink(missing_ok=True)
+
+
+def has_archive(folder):
+    return (Path(folder) / ARCHIVE_FILE).is_file()
+
+
+def archive_folder_in(chosen):
+    """Where the archive goes in a folder someone picked.
+
+    Its own subfolder, since scans skip the data folder and a folder of someone's files must
+    not turn into one. A folder that already is an archive is taken as it is.
+    """
+    return Path(chosen) if has_archive(chosen) else Path(chosen) / "Roostfile"
+
+
 class ArchiveCore:
     def __init__(self, data_dir):
         self.data_dir = _assert_local_path(data_dir, check_links=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = self.data_dir / "archive.sqlite3"
+        self.db_path = self.data_dir / ARCHIVE_FILE
         self.vault_dir = self.data_dir / "vault"
         self._write_lock = threading.RLock()
         self._scan_lock = threading.Lock()
@@ -1755,3 +1795,66 @@ class ArchiveCore:
     def close(self):
         """Connections are per operation; kept for desktop application's lifecycle."""
         return None
+
+    def check_new_folder(self, target):
+        """The folder as a full path, if the archive could live there."""
+        target = _assert_local_path(target, check_links=True)
+        if _within(target, self.data_dir) or _within(self.data_dir, target):
+            raise ValueError("Choose a folder outside the current archive.")
+        if not has_archive(target) and target.exists() and (not target.is_dir() or any(target.iterdir())):
+            raise ValueError("That folder already has other files in it. Choose another folder.")
+        return target
+
+    def copy_to(self, target, progress=lambda share: None, cancel=None):
+        """Copies the whole archive and checks the copy, which gets its real name only then. False if cancelled.
+
+        SQLite copies the database itself, so the copy is consistent even with the original in use.
+        """
+        target = _assert_local_path(target, check_links=True)
+        partial = target.with_name(target.name + ".moving")
+        shutil.rmtree(partial, ignore_errors=True)
+        partial.mkdir(parents=True)
+        try:
+            # SQLite's side files come and go, and what is in them reaches the copy through the backup.
+            others = [path for path in self.data_dir.rglob("*") if path.is_file() and not path.name.startswith(ARCHIVE_FILE)]
+            base_size = self.db_path.stat().st_size
+            total = max(1, base_size + sum(path.stat().st_size for path in others))
+            if shutil.disk_usage(partial).free < total:
+                raise ValueError("There is not enough free space there.")
+            def check(done):
+                if cancel and cancel.is_set():
+                    raise _Stopped
+                progress(min(done / total, .99))
+            with closing(sqlite3.connect(str(self.db_path))) as source, closing(sqlite3.connect(str(partial / ARCHIVE_FILE))) as copy:
+                source.backup(copy, pages=4096, progress=lambda status, remaining, pages: check(base_size * (pages - remaining) / max(1, pages)))
+                same = copy.execute("PRAGMA quick_check").fetchone()[0] == "ok" and all(
+                    source.execute(f"SELECT count(*) FROM {table}").fetchone() == copy.execute(f"SELECT count(*) FROM {table}").fetchone()
+                    for table in ("files", "sources"))
+            done = base_size
+            for path in others:
+                check(done)
+                copied = partial / path.relative_to(self.data_dir)
+                copied.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, copied)
+                same = same and copied.stat().st_size == path.stat().st_size
+                done += path.stat().st_size
+            if not same:
+                raise ValueError("The copy did not match the original, so nothing was changed.")
+            if target.exists():
+                target.rmdir()
+            for wait in (.1, .3, .6, 1, 0):  # On Windows a virus scanner may still have the new files open.
+                try:
+                    partial.rename(target)
+                    break
+                except PermissionError:
+                    if not wait:
+                        raise
+                    time.sleep(wait)
+        except _Stopped:
+            shutil.rmtree(partial, ignore_errors=True)
+            return False
+        except Exception:
+            shutil.rmtree(partial, ignore_errors=True)
+            raise
+        progress(1.0)
+        return True

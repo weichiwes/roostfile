@@ -13,6 +13,7 @@ from collections import OrderedDict
 import datetime as dt
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import threading
@@ -26,14 +27,18 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QStackedWidget, QSplitter, QListView,
     QAbstractItemView, QStyledItemDelegate, QStyle, QComboBox, QDialog, QDialogButtonBox,
     QTextEdit, QFileDialog, QMessageBox, QCheckBox, QRadioButton, QButtonGroup,
-    QHeaderView, QInputDialog, QKeySequenceEdit, QListWidget, QListWidgetItem, QMenu, QScrollArea, QSizePolicy, QSystemTrayIcon, QTableWidget, QTableWidgetItem,
+    QHeaderView, QInputDialog, QKeySequenceEdit, QListWidget, QListWidgetItem, QMenu, QProgressDialog, QScrollArea, QSizePolicy, QSystemTrayIcon, QTableWidget,
+    QTableWidgetItem,
 )
 
 from background import (
     AUTOSTART_AVAILABLE, DEFAULT_HOTKEY, FolderWatcher, GlobalHotkey, SingleInstance, autostart_command, autostart_enabled,
     foreground_window, give_keyboard_to, key_label, native_keys, open_with_default, set_autostart, show_in_folder, user_is_busy,
 )
-from core import ArchiveCore, MAX_PREVIEW_ROWS, TABLE_EXTS, _assert_local_path, _cloud_placeholder, is_noise, read_table
+from core import (
+    ArchiveCore, MAX_PREVIEW_ROWS, TABLE_EXTS, _assert_local_path, _cloud_placeholder, archive_folder_in, data_location, forget_location, has_archive, is_noise,
+    read_table, remember_location,
+)
 from demo import demo_data_dir, prepare_demo
 from i18n import LANGUAGES, app_name, condition_label, language, set_language, t
 import ocr
@@ -956,6 +961,8 @@ class WorkerSignals(QObject):
     changed = Signal(str, object)
     reading = Signal(int)
     sorted = Signal(object)
+    copying = Signal(float)
+    copied = Signal(object)
 
 
 _QSS = """
@@ -1040,7 +1047,7 @@ class ArchiveWindow(QMainWindow):
         super().__init__()
         load_local_fonts()
         self.demo = demo
-        self.data_root = BASE / (".demo-data" if demo else "data")
+        self.data_root = BASE / ".demo-data" if demo else data_location(BASE)
         self.data_root.mkdir(parents=True, exist_ok=True)
         self.config_file = self.data_root / "ui-state.json"
         self.config = self.load_config()
@@ -1085,6 +1092,8 @@ class ArchiveWindow(QMainWindow):
         self.signals.finished.connect(self.scan_finished)
         self.signals.failed.connect(self.scan_failed)
         self.signals.changed.connect(self.note_change)
+        self.signals.copying.connect(lambda share: self.copy_box.setValue(round(share * 1000)))
+        self.signals.copied.connect(self.archive_copied)
         self.changed_paths = {}
         self.signals.reading.connect(self.reading_progress)
         self.signals.sorted.connect(self.finish_sorting)
@@ -3108,6 +3117,11 @@ class ArchiveWindow(QMainWindow):
         location.setWordWrap(True)
         location.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(location)
+        if not self.demo:
+            def change():
+                dialog.accept()
+                QTimer.singleShot(0, self.change_archive_location)
+            layout.addWidget(button(t("Change location"), change, "folder", "quiet"), 0, Qt.AlignLeft)
         end = QHBoxLayout()
         end.addStretch()
         end.addWidget(button(t("Done"), dialog.accept, None, "primary"))
@@ -3116,6 +3130,98 @@ class ArchiveWindow(QMainWindow):
         dialog.deleteLater()
         if choice.currentData() != language():
             self.apply_language(choice.currentData())
+
+    def change_archive_location(self):
+        if self.scanning or self.sorting:
+            QMessageBox.information(self, t("Change location"), t("Wait for the current update or sorting to finish, then try again."))
+            return
+        chosen = QFileDialog.getExistingDirectory(self, t("Choose where to keep your archive"), str(self.data_root.parent))
+        if not chosen:
+            return
+        try:
+            target = self.core.check_new_folder(archive_folder_in(_assert_local_path(chosen)))  # Before anything looks inside it.
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, t("Could not move the archive"), as_plain(t(str(exc))))
+            return
+        if has_archive(target):
+            if QMessageBox.question(self, t("Change location"), as_plain(t("{path} already holds an archive. Switch to it? Your current archive stays as it is.", path=str(target)))) == QMessageBox.Yes:
+                self.use_archive(target, t("Your archive is now in {path}.", path=str(target)))
+        elif QMessageBox.question(self, t("Change location"), as_plain(t("Copy your archive to {path}? Your original files do not move.", path=str(target)))) == QMessageBox.Yes:
+            self.copy_archive(target)
+
+    def copy_archive(self, target):
+        """A large archive takes a while, so it copies in the background. Scans wait, as they do for sorting."""
+        self.save_tags()
+        self.copy_box = QProgressDialog(t("Copying your archive..."), t("Cancel"), 0, 1000, self)
+        self.copy_box.setWindowTitle(t("Change location"))
+        self.copy_box.setWindowModality(Qt.ApplicationModal)
+        self.copy_box.setAutoClose(False)
+        self.copy_box.setAutoReset(False)
+        self.copy_box.setMinimumDuration(0)
+        # Held here, not only by the worker: if its end dropped the last reference, Qt would undo this connection
+        # on that thread just as closing the box fires it, and the two would wait for each other for ever.
+        self.copy_cancel = threading.Event()
+        self.copy_box.canceled.connect(self.copy_cancel.set)
+        self.ocr_stop.set()
+        worker = threading.Thread(target=self.copy_in_background, args=(self.core, target, self.copy_cancel), daemon=True, name="moving")
+        self.sorting.append(worker)
+        worker.start()
+
+    def copy_in_background(self, core, target, cancel):
+        try:
+            if self.ocr_thread:
+                self.ocr_thread.join()
+            result = {"target": target} if core.copy_to(target, self.signals.copying.emit, cancel) else {}
+        except Exception as exc:
+            result = {"problem": str(exc)}
+        try:
+            self.signals.copied.emit(result)
+        except RuntimeError:
+            pass  # The window has gone.
+
+    def archive_copied(self, result):
+        self.sorting.pop(0)
+        self.copy_box.close()
+        self.ocr_stop.clear()
+        if "target" in result:
+            old = self.data_root
+            note = t("Your archive is now in {path}.", path=str(result["target"])) + "\n\n" + t("The old folder is still at {path}. You can delete it once everything looks right.", path=str(old))
+            if self.config.get("mcp"):
+                note += "\n\n" + t("Connected tools still use the old folder. Copy the setup for your tool again.")
+            self.use_archive(result["target"], note)
+        else:
+            if "problem" in result:
+                QMessageBox.warning(self, t("Could not move the archive"), as_plain(t(result["problem"])))
+            self.start_reading()
+
+    def use_archive(self, target, note):
+        """Everything that reads the data folder turns to the new one, as a restart would."""
+        try:
+            core = ArchiveCore(target)
+            remember_location(BASE, target)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, t("Could not move the archive"), as_plain(t(str(exc))))
+            self.start_reading()
+            return
+        self.ocr_stop.set()
+        if self.ocr_thread:
+            self.ocr_thread.join(3)
+        self.ocr_stop.clear()
+        self.core = core
+        self.data_root = target
+        self.config_file = target / "ui-state.json"
+        self.config = self.load_config()
+        self.selected_id = None
+        self.place = "all"
+        self.last_sorted = []
+        if self.assistant:
+            self.assistant.release_images()
+            self.assistant.images_folder = self.assistant_folder()
+            self.assistant.load_images()
+        self.watch_sources()
+        self.apply_language(self.config.get("language", language()))
+        self.start_reading()
+        QMessageBox.information(self, t("Change location"), as_plain(note))
 
     def add_drop_settings(self, layout):
         layout.addWidget(label(t("Files you drop on {name}", name=t("Roo")), "caption"))
@@ -3432,6 +3538,8 @@ def main():
     instance = SingleInstance(str(BASE / (".demo-data" if args.demo else "data")))
     if not args.render and not instance.claim():
         return 0
+    if not args.demo and not args.render and not find_archive():
+        return 0
     if args.demo:
         (BASE / ".demo-data").mkdir(exist_ok=True)
         probe = args.language or json_language(BASE / ".demo-data" / "ui-state.json")
@@ -3463,6 +3571,24 @@ def main():
     code = app.exec()
     ocr.release()
     return code
+
+
+def find_archive():
+    """A chosen folder may be on a drive that is not connected. An empty archive in its place would look like everything had gone."""
+    set_language(json_language(BASE / "data" / "ui-state.json"))
+    while True:
+        folder = data_location(BASE)
+        if folder == BASE / "data" or has_archive(folder):
+            return True
+        box = QMessageBox(QMessageBox.Warning, app_name(), as_plain(t("Could not find your archive at {path}. If it is on an external drive, connect the drive and try again.", path=str(folder))))
+        retry = box.addButton(t("Try again"), QMessageBox.AcceptRole)
+        default = box.addButton(t("Use the default folder"), QMessageBox.DestructiveRole)
+        box.addButton(t("Quit"), QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() == default:
+            forget_location(BASE)
+        elif box.clickedButton() != retry:
+            return False
 
 
 def json_language(path):
