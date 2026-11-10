@@ -22,7 +22,10 @@ from pages import image_reader
 from theme import BG, HAIRLINE_STRONG, TEXT
 
 MOODS = ("idle", "excited", "working", "happy")
-SIZES = {"small": 72, "medium": 96, "large": 128}
+# Her size is a share of the height of the screen she is on, so she looks the same on every screen.
+# Medium on a 1440-pixel screen at 125% scaling (1152 logical pixels tall) is 144.
+SIZES = {"small": .094, "medium": .125, "large": .167}
+SIDE_LIMITS = (64, 360)  # Logical pixels, for unusually small or large screens.
 SLIM = .62  # Roo's window is this share of a picture's width: she is tall and narrow.
 FIGURE = 1.08  # Her height, as a share of the size.
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -33,6 +36,12 @@ PASTIMES = {"reading": 24, "tea": 14}
 PLAY_AFTER = (15, 40)  # Seconds between one thing and the next.
 NAP_AFTER = 10 * 60  # Seconds nobody has touched her.
 BUBBLE_WIDTH = 340
+
+
+def side_for(screen_height, name):
+    """Her size in logical pixels on a screen this many logical pixels tall."""
+    low, high = SIDE_LIMITS
+    return round(min(max(SIZES.get(name, SIZES["medium"]) * screen_height, low), high))
 
 
 def readable_image(path) -> bool:
@@ -149,6 +158,7 @@ class Assistant(QWidget):
         self.movies = {}
         self.bubble = Bubble()
         self.size_name = "medium"
+        self.sized = side_for(600, "medium")
         self.load_images()
         self.set_size(size)
         self.timer = QTimer(self)
@@ -168,12 +178,19 @@ class Assistant(QWidget):
 
     def set_size(self, name):
         self.size_name = name if name in SIZES else "medium"
-        side = SIZES[self.size_name]
-        self.setFixedSize(self.base_width(), round(side * 1.25))
+        screen = self.screen() or QApplication.primaryScreen()
+        self.sized = side_for(screen.geometry().height(), self.size_name)
+        self.setFixedSize(self.base_width(), round(self.sized * 1.25))
 
     def base_width(self):
-        side = SIZES[self.size_name]
-        return side if self.custom else round(side * SLIM)
+        return self.sized if self.custom else round(self.sized * SLIM)
+
+    def moveEvent(self, event):
+        """Carried to another screen, she takes that screen's size."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if not self.lifting and side_for(screen.geometry().height(), self.size_name) != self.sized:
+            self.set_size(self.size_name)
+        super().moveEvent(event)
 
     def release_images(self):
         """A playing GIF keeps its file open, and Windows will not replace an open file."""
@@ -285,7 +302,7 @@ class Assistant(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        side = float(SIZES[self.size_name])
+        side = float(self.sized)
         width, height = self.base_width(), round(side * 1.25)
         lift, squash, tilt = self.pose()
         painter.setPen(Qt.NoPen)
@@ -365,7 +382,7 @@ class Assistant(QWidget):
         """By her collar. A picture has no collar, so it just follows the pointer."""
         if self.custom:
             return
-        side = SIZES[self.size_name]
+        side = self.sized
         width, height = self.base_width(), round(side * 1.25)
         scale = side * FIGURE / self.puppet.height
         at = self.puppet.grip

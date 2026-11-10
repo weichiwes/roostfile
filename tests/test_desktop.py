@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import desktop_app as ui
-from assistant import BUBBLE_WIDTH, SLIM
+from assistant import BUBBLE_WIDTH, SLIM, side_for
 import character as ui_character
 from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, QTimer, QUrl
 from PySide6.QtGui import QCloseEvent, QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QEnterEvent, QImage, QKeyEvent, QMouseEvent, QPainter, QTextDocument
@@ -234,11 +234,11 @@ class DesktopTests(unittest.TestCase):
     def test_her_window_fits_her_and_a_picture_gets_its_own(self):
         assistant = self.assistant()
         assistant.set_size("medium")
-        self.assertEqual(assistant.width(), round(96 * SLIM))
+        self.assertEqual(assistant.width(), round(assistant.sized * SLIM))
         self.window.set_assistant_image(self.picture("me.png"))
-        self.assertEqual(assistant.width(), 96)
+        self.assertEqual(assistant.width(), assistant.sized)
         self.window.reset_assistant()
-        self.assertEqual(assistant.width(), round(96 * SLIM))
+        self.assertEqual(assistant.width(), round(assistant.sized * SLIM))
 
     def test_every_painting_is_there_and_small(self):
         puppet = ui_character.Puppet()
@@ -250,11 +250,26 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual((image.width(), image.height()), (puppet.width, puppet.height), name)
         self.assertLess(sum(path.stat().st_size for path in ui_character.ASSETS.iterdir()), 2 * 1024 * 1024)
 
-    def test_she_stays_icon_sized(self):
-        self.assertEqual(ui.SIZES, {"small": 72, "medium": 96, "large": 128})
+    def test_her_size_follows_the_screen(self):
+        # 2560 x 1440 at 125%: half as big again as the old fixed 96.
+        self.assertEqual(side_for(1152, "medium"), 144)
+        self.assertEqual(side_for(1080, "medium"), 135)
+        self.assertEqual(side_for(2160, "medium"), 270)
+        self.assertLess(side_for(1152, "small"), side_for(1152, "medium"))
+        self.assertLess(side_for(1152, "medium"), side_for(1152, "large"))
+        self.assertEqual(side_for(300, "small"), 64)
+        self.assertEqual(side_for(5000, "large"), 360)
         assistant = self.assistant()
         assistant.set_size("medium")
-        self.assertLessEqual(assistant.height(), 125)
+        self.assertEqual(assistant.sized, side_for(assistant.screen().geometry().height(), "medium"))
+        self.assertEqual(assistant.height(), round(assistant.sized * 1.25))
+
+    def test_a_bigger_roo_is_kept_on_screen(self):
+        assistant = self.assistant()
+        area = assistant.screen().availableGeometry()
+        assistant.move(area.right() - 10, area.bottom() - 10)
+        self.window.resize_assistant("large")
+        self.assertTrue(area.contains(assistant.geometry()))
 
     def drawn(self, puppet, pose, size=192):
         image = QImage(size, round(size * 1.2), QImage.Format_ARGB32_Premultiplied)

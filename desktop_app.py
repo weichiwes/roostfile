@@ -2831,6 +2831,7 @@ class ArchiveWindow(QMainWindow):
             if not any(screen.availableGeometry().contains(start) for screen in QGuiApplication.screens()):
                 start = QPoint(area.right() - self.assistant.width() - 24, area.bottom() - self.assistant.height() - 24)
             self.assistant.move(start)
+            self.keep_assistant_on_screen()  # Her size follows the screen, so a saved spot may no longer fit her.
             self.assistant.show()
             self.greet()
 
@@ -2885,9 +2886,14 @@ class ArchiveWindow(QMainWindow):
 
     def resize_assistant(self, name):
         self.assistant.set_size(name)
-        area = self.assistant.screen().availableGeometry()
-        self.assistant.move(min(self.assistant.x(), area.right() - self.assistant.width()), min(self.assistant.y(), area.bottom() - self.assistant.height()))
+        self.keep_assistant_on_screen()
         self.save_setting("assistant_size", name)
+
+    def keep_assistant_on_screen(self):
+        area = self.assistant.screen().availableGeometry()
+        x = max(area.left(), min(self.assistant.x(), area.right() - self.assistant.width()))
+        y = max(area.top(), min(self.assistant.y(), area.bottom() - self.assistant.height()))
+        self.assistant.move(x, y)
 
     def choose_assistant_image(self):
         path, _ = QFileDialog.getOpenFileName(self, t("Change image"), "", "Images (*.png *.jpg *.jpeg *.webp *.gif *.bmp)")
