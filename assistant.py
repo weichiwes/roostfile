@@ -1,8 +1,9 @@
 """Roo, the small desktop assistant: a drop target with a bit of life in it.
 
 She is the puppet in character.py, and any picture can replace her. Hops and
-bounces apply to every look, so a person's own image feels alive too. Name a
-folder's pictures idle, excited, working and happy to give each mood its own.
+bounces apply to every look, so a person's own image feels alive too; Roo sways,
+breathes and works on her own. Name a folder's pictures idle, excited, working
+and happy to give each mood its own.
 """
 from __future__ import annotations
 
@@ -22,14 +23,15 @@ from theme import BG, HAIRLINE_STRONG, TEXT
 
 MOODS = ("idle", "excited", "working", "happy")
 SIZES = {"small": 72, "medium": 96, "large": 128}
+SLIM = .62  # Roo's window is this share of a picture's width: she is tall and narrow.
+FIGURE = 1.08  # Her height, as a share of the size.
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 IMAGE_TYPES = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 FRAME_MS = 33
 # What she gets up to on her own, and for how many seconds.
-PASTIMES = {"reading": 24, "homework": 24, "playing": 12, "tea": 14, "stretching": 3}
+PASTIMES = {"reading": 24, "tea": 14}
 PLAY_AFTER = (15, 40)  # Seconds between one thing and the next.
 NAP_AFTER = 10 * 60  # Seconds nobody has touched her.
-GAZE_SOFTNESS = 260  # Logical pixels. Her eyes lean towards the pointer rather than snap to it.
 BUBBLE_WIDTH = 340
 
 
@@ -128,7 +130,6 @@ class Assistant(QWidget):
         self.puppet = Puppet()
         self.rig = Rig(reduced_motion)
         self.frame = 0
-        self.talk_until = 0
         self.hop = 0.0
         self.pressed_at = None
         self.travelled = False
@@ -147,8 +148,9 @@ class Assistant(QWidget):
         self.pictures = {}
         self.movies = {}
         self.bubble = Bubble()
-        self.set_size(size)
+        self.size_name = "medium"
         self.load_images()
+        self.set_size(size)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.start(FRAME_MS)
@@ -167,7 +169,11 @@ class Assistant(QWidget):
     def set_size(self, name):
         self.size_name = name if name in SIZES else "medium"
         side = SIZES[self.size_name]
-        self.setFixedSize(side, round(side * 1.25))
+        self.setFixedSize(self.base_width(), round(side * 1.25))
+
+    def base_width(self):
+        side = SIZES[self.size_name]
+        return side if self.custom else round(side * SLIM)
 
     def release_images(self):
         """A playing GIF keeps its file open, and Windows will not replace an open file."""
@@ -178,9 +184,7 @@ class Assistant(QWidget):
 
     def load_images(self):
         self.release_images()
-        if not self.images_folder.is_dir():
-            return
-        for path in sorted(self.images_folder.iterdir()):
+        for path in sorted(self.images_folder.iterdir()) if self.images_folder.is_dir() else ():
             if path.stem not in MOODS or not readable_image(path):
                 continue
             if path.suffix.lower() == ".gif":
@@ -189,6 +193,8 @@ class Assistant(QWidget):
                 self.movies[path.stem] = movie
             else:
                 self.pictures[path.stem] = QPixmap(str(path))
+        if not self.lifting:
+            self.set_size(self.size_name)  # A picture takes a wider window than Roo.
 
     @property
     def custom(self):
@@ -220,7 +226,6 @@ class Assistant(QWidget):
     def say(self, text, seconds=5):
         if self.isVisible():  # Hidden for a game or a presentation, so it keeps quiet too.
             self.bubble.say(text, QRectF(self.geometry()), seconds)
-            self.talk_until = self.frame + min(90, 12 + len(text) * 2)
 
     def tick(self):
         if not self.isVisible():
@@ -232,14 +237,13 @@ class Assistant(QWidget):
         if not self.reduced_motion and random.random() < .0008:
             self.hop = 1.0
         self.hop = max(0.0, self.hop - .03)
-        talking = self.frame < self.talk_until
         self.pull += ((self.x() - self.last_x) * 1000 / FRAME_MS - self.pull) * .35 if self.lifting else -self.pull
         self.last_x = self.x()
-        pose = self.rig.step(FRAME_MS / 1000, self.mood, self.gaze(), talking, self.pull)
+        pose = self.rig.step(FRAME_MS / 1000, self.mood, self.pull)
         self.maybe_play()
         # Sitting still needs few frames, and this runs all day.
         calm = self.mood == "idle" or self.mood in PASTIMES or self.mood == "napping"
-        if not calm or self.hop or talking or pose.eye_open < 1 or not self.frame % 2:
+        if not calm or self.hop or pose.mix < 1 or pose.shut or not self.frame % 2:
             self.update()
 
     def maybe_play(self):
@@ -259,27 +263,22 @@ class Assistant(QWidget):
         self.last_touch = self.frame
         self.next_play = self.frame + random.uniform(*PLAY_AFTER) * 1000 / FRAME_MS
         if self.mood == "napping":
-            self.set_mood("stretching", PASTIMES["stretching"])
+            self.set_mood("greeting", 2)  # Woken, she bows.
         elif self.mood in PASTIMES:
             self.set_mood("idle")
 
-    def gaze(self):
-        """Which way the pointer is, from -1 to 1, so her eyes can follow it. It is not kept."""
-        if self.reduced_motion:
-            return 0.0, 0.0
-        offset = QCursor.pos() - self.geometry().center()
-        return offset.x() / (abs(offset.x()) + GAZE_SOFTNESS), offset.y() / (abs(offset.y()) + GAZE_SOFTNESS)
-
     def pose(self):
-        """(lift, squash, tilt) for this moment, shared by Roo and any picture."""
+        """(lift, squash, tilt) for this moment. A picture gets all of it; Roo moves for herself, so she gets the hops and the excited bounce."""
         if self.reduced_motion or self.lifting:
             return 0.0, 1.0, 0.0
         now = self.frame * FRAME_MS / 1000
+        hop = math.sin(self.hop * math.pi * 3) * self.hop
+        if not self.custom and self.mood != "excited":  # She moves for herself, so only hops come from here.
+            return 14 * abs(hop), 1 - .06 * hop, 0.0
         if self.mood == "working":
             return 2 * abs(math.sin(now * 7)), 1 + .03 * math.sin(now * 14), 5 * math.sin(now * 7)
         if self.mood == "excited":
             return 5 * abs(math.sin(now * 6)), 1 + .06 * math.sin(now * 12), 4 * math.sin(now * 12)
-        hop = math.sin(self.hop * math.pi * 3) * self.hop
         return 2 * math.sin(now * 2) + 14 * abs(hop), 1 + .015 * math.sin(now * 2) - .06 * hop, 0.0
 
     def paintEvent(self, event):
@@ -287,7 +286,7 @@ class Assistant(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         side = float(SIZES[self.size_name])
-        height = round(side * 1.25)
+        width, height = self.base_width(), round(side * 1.25)
         lift, squash, tilt = self.pose()
         painter.setPen(Qt.NoPen)
         # Fully clear pixels let clicks and drops through to the desktop, so a near miss would be lost.
@@ -295,19 +294,20 @@ class Assistant(QWidget):
         painter.translate(self.margin)
         if not self.lifting:
             painter.setBrush(QColor(0, 0, 0, 46))
-            painter.drawEllipse(QRectF(side * .24, height - side * .1, side * .52, side * .08))
+            shadow = side * (.52 if self.custom else .34)
+            painter.drawEllipse(QRectF(width / 2 - shadow / 2, height - side * .1, shadow, side * .08))
         picture = self.picture()
         drawn = picture is not None and not picture.isNull()
         if not drawn:  # She leans and breathes for herself, so the hops stay small.
             lift, squash, tilt = lift * side / 110, 1 + (squash - 1) * .6, 0.0
-        painter.translate(side / 2, height - side * .06 - lift)
+        painter.translate(width / 2, height - side * .06 - lift)
         painter.rotate(tilt)
         painter.scale(2 - squash, squash)
         if drawn:
             scaled = picture.size().scaled(round(side), round(height * .92), Qt.KeepAspectRatio)
             painter.drawPixmap(QRectF(-scaled.width() / 2, -scaled.height(), scaled.width(), scaled.height()), picture, QRectF(picture.rect()))
         else:
-            self.puppet.draw(painter, side * .98, self.rig.pose, self.devicePixelRatioF())
+            self.puppet.draw(painter, side * FIGURE, self.rig.pose, self.devicePixelRatioF())
 
     def enterEvent(self, event):
         self.hop = max(self.hop, .5)
@@ -366,14 +366,14 @@ class Assistant(QWidget):
         if self.custom:
             return
         side = SIZES[self.size_name]
-        height = round(side * 1.25)
-        scale = side * .98 / self.puppet.width
+        width, height = self.base_width(), round(side * 1.25)
+        scale = side * FIGURE / self.puppet.height
         at = self.puppet.grip
         self.margin = QPoint(round(side * .5), round(side * .6))
         self.after_lift = "working" if self.mood == "working" else "idle"
         self.mood_timer.stop()
-        self.setFixedSize(side + self.margin.x() * 2, height + self.margin.y() + round(side * .3))
-        self.grip = self.margin + QPoint(round(side / 2 + (at.x() - self.puppet.width / 2) * scale),
+        self.setFixedSize(width + self.margin.x() * 2, height + self.margin.y() + round(side * .3))
+        self.grip = self.margin + QPoint(round(width / 2 + (at.x() - self.puppet.width / 2) * scale),
                                          round(height - side * .06 + (at.y() - self.puppet.height) * scale))
         self.set_mood("dangling")
         self.lifting = True

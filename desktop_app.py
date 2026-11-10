@@ -2835,7 +2835,7 @@ class ArchiveWindow(QMainWindow):
             self.greet()
 
     def greet(self):
-        """She waves each time she arrives, and introduces herself the first time."""
+        """She bows each time she arrives, and introduces herself the first time."""
         if self.assistant_greeted:
             return
         self.assistant_greeted = True

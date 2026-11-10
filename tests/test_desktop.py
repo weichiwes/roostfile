@@ -1,4 +1,5 @@
 """Native Qt integration tests, restricted to the synthetic demo archive."""
+import itertools
 import json
 import math
 import os
@@ -16,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import desktop_app as ui
-from assistant import BUBBLE_WIDTH
+from assistant import BUBBLE_WIDTH, SLIM
 import character as ui_character
 from PySide6.QtCore import QCoreApplication, QEvent, QMimeData, QPoint, QPointF, QRectF, QTimer, QUrl
 from PySide6.QtGui import QCloseEvent, QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QEnterEvent, QImage, QKeyEvent, QMouseEvent, QPainter, QTextDocument
@@ -219,54 +220,34 @@ class DesktopTests(unittest.TestCase):
         assistant = self.assistant()
         for size in ui.SIZES:
             assistant.set_size(size)
-            for mood in ("idle", "excited", "working", "happy"):
+            for mood in ui.character.ACTIONS:
                 assistant.set_mood(mood)
-                assistant.frame += 7
+                for _ in range(12):
+                    assistant.rig.step(1 / 30, mood)
                 image = assistant.grab().toImage()
                 with self.subTest(size=size, mood=mood):
-                    middle = image.pixelColor(image.width() // 2, int(image.height() * .75))
+                    # Her sweater, a little below her chin.
+                    middle = image.pixelColor(image.width() // 2, int(image.height() * .5))
                     self.assertGreater(middle.alpha(), 200)
                     self.assertNotEqual(middle.getRgb()[:3], (0, 0, 0))
 
-    def test_her_eyes_follow_and_she_blinks(self):
-        rig = ui_character.Rig()
-        pose = None
-        for _ in range(60):
-            pose = rig.step(1 / 30, "idle", (.9, 0))
-        self.assertGreater(pose.eye_x, .7)
-        self.assertGreater(pose.angle_x, .5)
-        rig.next_blink = 0
-        shut = min(rig.step(1 / 30).eye_open for _ in range(8))
-        self.assertLess(shut, .3)
-        self.assertGreater(max(rig.step(1 / 30).eye_open for _ in range(8)), .9)
+    def test_her_window_fits_her_and_a_picture_gets_its_own(self):
+        assistant = self.assistant()
+        assistant.set_size("medium")
+        self.assertEqual(assistant.width(), round(96 * SLIM))
+        self.window.set_assistant_image(self.picture("me.png"))
+        self.assertEqual(assistant.width(), 96)
+        self.window.reset_assistant()
+        self.assertEqual(assistant.width(), round(96 * SLIM))
 
-    def test_the_rig_cannot_blow_up_at_a_long_frame(self):
-        rig = ui_character.Rig()
-        for look in ((1, 1), (-1, -1)) * 20:
-            pose = rig.step(.2, "excited", look, True)
-            self.assertTrue(all(abs(getattr(pose, field.name)) < 1e4 for field in ui_character.fields(pose)))
-
-    def test_her_irises_stay_inside_her_eyes(self):
+    def test_every_painting_is_there_and_small(self):
         puppet = ui_character.Puppet()
-        puppet.prepare(192)
-        self.assertFalse(puppet.white_outline.isEmpty())
-        looked = []
-        for look in (-1, 1):
-            image = QImage(192, 230, QImage.Format_ARGB32_Premultiplied)
-            image.fill(0)
-            painter = QPainter(image)
-            painter.translate(96, 226)
-            puppet.draw(painter, 192, ui_character.Pose(eye_x=look))
-            painter.end()
-            looked.append(bytes(image.constBits()))
-        self.assertNotEqual(*looked)
-
-    def test_every_layer_is_a_real_picture(self):
-        puppet = ui_character.Puppet()
-        self.assertGreaterEqual(len(puppet.layers), 28)
-        for name, (image, rect) in puppet.layers.items():
+        wanted = {key for action in ui_character.ACTIONS.values() for key in action.keys + ((action.blink,) if action.blink else ())}
+        self.assertEqual(set(puppet.paintings), wanted)
+        for name, image in puppet.paintings.items():
             self.assertFalse(image.isNull(), name)
             self.assertTrue(image.hasAlphaChannel(), name)
+            self.assertEqual((image.width(), image.height()), (puppet.width, puppet.height), name)
         self.assertLess(sum(path.stat().st_size for path in ui_character.ASSETS.iterdir()), 2 * 1024 * 1024)
 
     def test_she_stays_icon_sized(self):
@@ -284,77 +265,99 @@ class DesktopTests(unittest.TestCase):
         painter.end()
         return image
 
-    def test_turning_her_head_leaves_its_outline_where_it_was(self):
-        puppet = ui_character.Puppet()
-        still = self.drawn(puppet, ui_character.Pose())
-        for turned in (-1.0, 1.0):
-            moved = self.drawn(puppet, ui_character.Pose(angle_x=turned))
-            for y in range(4, 60):  # The top of her hair, where layers used to come apart.
-                for x in range(40, 150, 6):
-                    self.assertLess(abs(still.pixelColor(x, y).alpha() - moved.pixelColor(x, y).alpha()), 200, (x, y))
+    def keys(self, mood, seconds, rig=None):
+        rig = rig or ui_character.Rig()
+        seen = []
+        for _ in range(round(seconds * 30)):
+            pose = rig.step(1 / 30, mood)
+            seen.append((pose.key, pose.before, pose.mix, pose.shut))
+        return seen
 
-    def test_everything_on_her_head_moves_with_the_same_turn(self):
-        puppet = ui_character.Puppet()
-        for moved in puppet.moved(QPointF(puppet.head.x() + 1000, puppet.head.y()), 12, 6):
-            self.assertAlmostEqual(moved, 0)
-        middle = puppet.moved(puppet.head, 12, 0)[0]
-        self.assertAlmostEqual(middle, ui_character.TURN)
+    def test_every_mood_shows_its_own_painting(self):
+        for mood, key in (("idle", "idle"), ("greeting", "greet"), ("working", "busy"), ("happy", "done"), ("excited", "found"),
+                          ("reading", "read"), ("tea", "tea"), ("napping", "nap"), ("dangling", "lifted"), ("no such mood", "idle")):
+            self.assertEqual(self.keys(mood, .5)[-1][0], key, mood)
 
-    def test_a_turn_is_kept_rather_than_warped_again(self):
-        puppet = ui_character.Puppet()
-        puppet.prepare(96)
-        puppet.warped("key down", 3, 0)
-        kept = puppet.warped("key down", 3, 0)
-        self.assertIs(kept, puppet.warped("key down", 3, 0))
-        self.assertEqual(len(puppet.warps), 1)
+    def test_sorting_goes_through_its_paintings_slowly_and_in_order(self):
+        seen = self.keys("working", 9.6)
+        order = [key for index, (key, *_rest) in enumerate(seen) if not index or key != seen[index - 1][0]]
+        self.assertEqual(order, ["busy", "busy-look", "busy-tuck"] * 2 + ["busy"])
+        runs = [sum(1 for _ in group) for _, group in itertools.groupby(key for key, *_rest in seen)]
+        self.assertGreaterEqual(min(runs[1:-1]), 30)  # Every painting stays up at least a second.
 
-    def test_kept_layers_stay_within_their_limit(self):
-        puppet = ui_character.Puppet()
-        puppet.prepare(96)
-        for turn in range(ui_character.CACHED + 20):
-            puppet.remember(puppet.warps, turn, None)
-        self.assertLessEqual(len(puppet.warps), ui_character.CACHED)
+    def test_a_new_painting_fades_in_rather_than_jumping(self):
+        rig = ui_character.Rig()
+        self.keys("idle", 1, rig)
+        rig.next_blink = 99
+        seen = self.keys("happy", .5, rig)
+        self.assertEqual(seen[0][:2], ("done", "idle"))
+        mixes = [mix for *_keys, mix, _shut in seen]
+        self.assertLess(mixes[0], .2)
+        self.assertEqual(mixes, sorted(mixes))
+        self.assertEqual(mixes[-1], 1)
+        self.assertGreaterEqual(sum(1 for mix in mixes if mix < 1), 4)
 
-    def test_every_action_is_a_whole_painting(self):
+    def test_a_fade_is_a_true_blend_outline_and_all(self):
         puppet = ui_character.Puppet()
-        for mood, key in (("idle", "key down"), ("working", "key hold hug"), ("greeting", "key wave top"), ("stretching", "key stretch top"),
-                          ("napping", "key nap"), ("dangling", "key lifted")):
-            with patch.object(puppet, "put_warped", wraps=puppet.put_warped) as put:
-                self.drawn(puppet, ui_character.replace(ui_character._MOODS[mood], clock=0))
-            self.assertEqual(put.call_args_list[0].args[1], key, mood)
+        puppet.prepare(260)
+        both = puppet.painting(ui_character.Pose(key="lifted", before="idle", mix=.5)).toImage()
+        idle, lifted = puppet.scaled["idle"].toImage(), puppet.scaled["lifted"].toImage()
+        for x, y in ((40, 250), (55, 245), (60, 200), (53, 150)):
+            expected = (idle.pixelColor(x, y).alpha() + lifted.pixelColor(x, y).alpha()) / 2
+            self.assertAlmostEqual(both.pixelColor(x, y).alpha(), expected, delta=3, msg=(x, y))
+        middle = puppet.painting(ui_character.Pose(key="busy-look", before="busy", mix=.5)).toImage()
+        self.assertEqual(middle.pixelColor(middle.width() // 2, middle.height() // 2).alpha(), 255)  # Her sweater stays solid.
 
-    def test_an_action_passes_through_its_paintings_on_the_way_up(self):
-        puppet, rig = ui_character.Puppet(), ui_character.Rig()
-        keys = []
-        for _ in range(60):
-            key = puppet.key(rig.step(1 / 30, "working"))
-            if not keys or keys[-1] != key:
-                keys.append(key)
-        self.assertEqual(keys, ["key down", "key hold low", "key hold hug"])
+    def test_standing_she_blinks_now_and_then(self):
+        rig = ui_character.Rig()
+        seen = self.keys("idle", 12, rig)
+        shut = [index for index, (*_rest, eyes) in enumerate(seen) if eyes == "idle-blink"]
+        self.assertTrue(shut)
+        self.assertLess(len(shut), len(seen) * .1)
+        rig.poke()
+        self.assertEqual(rig.step(1 / 30, "idle").shut, "idle-blink")
+        self.assertFalse(any(eyes for *_rest, eyes in self.keys("working", 12)))
 
-    def test_held_up_mid_action_she_lets_go_of_it(self):
+    def test_she_sways_from_her_feet(self):
         puppet = ui_character.Puppet()
-        self.assertEqual(puppet.key(ui_character.Pose(lifted=1, hold=1, book=1)), "key lifted")
+        still = self.drawn(puppet, ui_character.Pose(sway=1e-6))
+        leaning = self.drawn(puppet, ui_character.Pose(sway=.02))
+        rows = lambda image, y: [image.pixelColor(x, y).alpha() for x in range(image.width())]
+        shoes = zip(rows(still, still.height() - 8), rows(leaning, leaning.height() - 8))
+        self.assertLessEqual(max(abs(a - b) for a, b in shoes), 3)
+        self.assertNotEqual(rows(still, 40), rows(leaning, 40))  # Her hair.
 
-    def test_at_the_sip_the_cup_covers_her_mouth(self):
-        puppet = ui_character.Puppet()
-        pose = ui_character.Pose(cup=1, clock=math.pi / 2 / .95)
-        self.assertEqual(puppet.key(pose), "key tea sip")
-        with patch.object(puppet, "mouth_") as mouth:
-            self.drawn(puppet, pose)
-        mouth.assert_not_called()
+    def test_her_head_dips_over_the_folder_and_comes_back_up_to_read(self):
+        rig = ui_character.Rig()
+        nods = {}
+        for _ in range(round(30 * 4.7)):
+            pose = rig.step(1 / 30, "working")
+            nods.setdefault(pose.key, []).append(pose.nod)
+        self.assertGreater(max(nods["busy"]), .005)
+        self.assertLess(min(nods["busy-look"]), .001)
+        steps = [abs(b - a) for a, b in itertools.pairwise(n for key in ("busy", "busy-look", "busy-tuck") for n in nods[key])]
+        self.assertLess(max(steps), .0015)  # Eased, never a jump.
 
-    def test_every_painting_the_rig_can_ask_for_exists(self):
-        puppet = ui_character.Puppet()
-        keys = {name for name in puppet.layers if name.startswith("key ")}
-        asked = set()
-        for field in ui_character.ARMS + ("lifted", "nap"):
-            for amount in (.1, .3, .5, .8, 1):
-                for clock in (0, .4, .8, 1.2, 2, 2.6, 3.4):
-                    pose = ui_character.replace(ui_character.Pose(clock=clock), **{field: amount})
-                    asked.add(puppet.key(pose))
-                    asked.add(puppet.key(ui_character.replace(pose, swing=10.0)))
-        self.assertEqual(asked, keys)
+    def test_a_change_of_mood_never_jerks_her(self):
+        rig = ui_character.Rig()
+        self.keys("idle", 2.2, rig)
+        before = rig.pose.sway
+        after = rig.step(1 / 30, "napping").sway
+        self.assertLess(abs(after - before), .002)
+
+    def test_held_up_she_keeps_swinging_and_puts_it_away_when_set_down(self):
+        rig = ui_character.Rig()
+        swings = [rig.step(1 / 30, "dangling").swing for _ in range(90)]
+        self.assertGreater(max(swings) - min(swings), 4)
+        for _ in range(30):
+            rig.step(1 / 30, "idle")
+        self.assertEqual(rig.pose.swing, 0)
+
+    def test_the_rig_cannot_blow_up_at_a_long_frame(self):
+        rig = ui_character.Rig()
+        for mood in ("dangling", "working", "idle") * 20:
+            pose = rig.step(.2, mood, 9000)
+            self.assertTrue(all(abs(value) < 1e4 for value in (pose.sway, pose.breath, pose.nod, pose.swing, pose.mix)))
 
     def test_the_whole_window_catches_a_drop(self):
         # Fully clear pixels let a drop fall through to the desktop.
@@ -566,7 +569,7 @@ class DesktopTests(unittest.TestCase):
         assistant.dragLeaveEvent(None)
         self.assertEqual(assistant.mood, "working")
 
-    def test_she_waves_when_she_arrives_and_introduces_herself_once(self):
+    def test_she_bows_when_she_arrives_and_introduces_herself_once(self):
         assistant = self.assistant()
         assistant.hide()
         self.window.config.pop("greeted", None)
@@ -583,7 +586,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(assistant.mood, "idle")
         self.assertFalse(assistant.bubble.isVisible())
 
-    def test_the_wave_changes_how_she_looks(self):
+    def test_the_bow_changes_how_she_looks(self):
         assistant = self.assistant()
         assistant.reduced_motion = True
         assistant.rig.reduced_motion = True
@@ -660,7 +663,7 @@ class DesktopTests(unittest.TestCase):
         assistant.plays = False
         assistant.reduced_motion = True
         looks = {}
-        for mood in ("idle", "greeting", "stretching", "reading", "homework", "playing", "tea", "napping", "working", "happy"):
+        for mood in ui.character.ACTIONS:
             assistant.mood = mood
             assistant.rig.step(0, mood)
             looks[mood] = bytes(assistant.grab().toImage().constBits())
@@ -687,14 +690,14 @@ class DesktopTests(unittest.TestCase):
             assistant.maybe_play()
             self.assertNotEqual(assistant.last_pastime, before)
 
-    def test_after_a_long_while_she_dozes_and_wakes_with_a_stretch(self):
+    def test_after_a_long_while_she_dozes_and_wakes_with_a_bow(self):
         assistant = self.assistant()
         self.bored(assistant)
         assistant.frame = int(ui.NAP_AFTER * 1000 / ui.FRAME_MS) + 10
         assistant.maybe_play()
         self.assertEqual(assistant.mood, "napping")
         assistant.touched()
-        self.assertEqual(assistant.mood, "stretching")
+        self.assertEqual(assistant.mood, "greeting")
 
     def test_she_keeps_still_when_asked(self):
         assistant = self.assistant()
@@ -760,9 +763,8 @@ class DesktopTests(unittest.TestCase):
         assistant.set_mood("excited")
         assistant.frame = 13
         self.assertEqual(assistant.pose(), (0.0, 1.0, 0.0))
-        looking = [assistant.rig.step(1 / 30, "excited", (1, 1), True) for _ in range(5)][-1]
-        self.assertEqual((looking.eye_x, looking.breath, looking.swing), (0, 0, 0))
-        self.assertEqual(assistant.gaze(), (0.0, 0.0))
+        still = [assistant.rig.step(1 / 30, "dangling", 900) for _ in range(5)][-1]
+        self.assertEqual((still.sway, still.breath, still.nod, still.swing, still.mix, still.shut), (0, 0, 0, 0, 1, ""))
         assistant.reduced_motion = False
         self.assertNotEqual(assistant.pose(), (0.0, 1.0, 0.0))
 

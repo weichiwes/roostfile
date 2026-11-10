@@ -1154,8 +1154,8 @@ nas:/export on /Volumes/my files (nfs, nodev)
         names = zipfile.ZipFile(archive).namelist()
         self.assertIn("app/.vendor/PySide6/a.pyd", names)
         self.assertIn("app/character.py", names)
-        self.assertIn("app/assets/roo/layers.json", names)
-        self.assertIn("app/assets/roo/key-down.png", names)
+        self.assertIn("app/assets/roo/roo.json", names)
+        self.assertIn("app/assets/roo/idle.png", names)
         self.assertFalse([name for name in names if "/bin/" in name or "/data/" in name or name.endswith((".sqlite3", "ui-state.json"))])
 
     def names(self):

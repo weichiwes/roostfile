@@ -16,7 +16,7 @@ A private file archive for your own computer. Add the folders you choose, then f
 
 ![Quick search](previews/windows/en-quick.png)
 
-- **Hand files to Roo.** A tiny chibi assistant stands on your desktop. Drop files or a folder on her and she reads them, hugging a folder as she works, then files each one in a collection named for its subject, such as Contract or Invoice. By default she keeps a copy and leaves the original where it is. Settings can have her move files into your library instead, sorted into a folder for each subject. Click her to search, drag her anywhere, or replace her with your own picture.
+- **Hand files to Roo.** A tiny chibi assistant stands on your desktop. Drop files or a folder on her and she reads them, pulling sheets from her folder as she works, then files each one in a collection named for its subject, such as Contract or Invoice. By default she keeps a copy and leaves the original where it is. Settings can have her move files into your library instead, sorted into a folder for each subject. Click her to search, drag her anywhere, or replace her with your own picture.
 - **Connect your own tools.** An MCP server lets assistants and workflows search and read your archive, once you allow it in Settings.
 - **Index in place or keep a copy.** Choose per folder, and switch at any time. Folders you add are never moved, renamed or deleted.
 - **See what just arrived.** When a new file lands, a small bar appears at the top of the screen with Copy and Open. It never takes the keyboard, and it stays away during games and presentations.
@@ -39,7 +39,7 @@ A private file archive for your own computer. Add the folders you choose, then f
 
 ![Roo standing, facing you](previews/roo.png)
 
-She waves when she arrives. Her eyes follow your pointer, she blinks, breathes and talks. Pick her up by the collar and your pointer becomes the hand: her cardigan rides up, her legs dangle, and she swings as you move. Leave her alone and she reads, does her homework, bounces a ball, sips tea or dozes off where she stands. That is a timer: she watches nothing you do. Her right-click menu can stop her playing or pin her in place. She is a layered illustration moved by a small rig written for this app, in the manner of Live2D. She is not a Live2D model and uses none of its software.
+She bows when she arrives. She blinks, breathes and sways a little where she stands, and while she sorts she pulls a sheet from her folder, reads it and tucks it back. Pick her up by the collar and your pointer becomes the hand: her legs dangle and she swings as you move. Leave her alone and she reads or sips tea, and after a long while she dozes off where she stands. That is a timer: she watches nothing you do. Her right-click menu can stop her playing or pin her in place. She is a set of finished paintings brought to life by a little code written for this app, which draws the sway, the breathing, the blinks and the fades between poses as you watch. She is not a Live2D model and uses none of its software.
 
 Right-click Roo and choose **Change image**. PNG, JPG, WebP, BMP and GIF up to 20 MB work, and a GIF plays. Any picture bobs, squashes and hops, and the copy is kept in your archive, so the original can move.
 
@@ -139,7 +139,7 @@ Scripts and programs are shown in their folder rather than run.
 
 Roostfile has no account, no telemetry and no update check, and it never connects to the internet. The app blocks its own network sockets at startup, refuses network folders, and does not follow the links to other computers that SVG files and rich text can carry. On a test run a system call trace on Linux recorded no internet connections, and neither did watching the app's network endpoints on Windows. The same test has not been run on a Mac.
 
-Only folders you add and files you drop on Roo are read. Her eyes follow the pointer's position, which is not stored. A single dropped file brings nothing else from its folder. Connected tools have no access until you allow it, and a tool you connect can read the text of your files and may send it to an online service, depending on that tool. Words in photos and scans are read on this computer by Windows, and nothing is uploaded. Closing the window keeps the app running in the tray, for the shortcut and for change notices; you can turn that off in Settings, and starting with Windows is off until you turn it on. The app makes no network requests: it has no accounts, telemetry or update checks, and it blocks Python sockets at startup. That check is inside the app, not a firewall. Opening a file hands it to your default app, which behaves as that app does. Network paths and mapped drives are refused, and cloud placeholders are skipped so that browsing never triggers a download.
+Only folders you add and files you drop on Roo are read. A single dropped file brings nothing else from its folder. Connected tools have no access until you allow it, and a tool you connect can read the text of your files and may send it to an online service, depending on that tool. Words in photos and scans are read on this computer by Windows, and nothing is uploaded. Closing the window keeps the app running in the tray, for the shortcut and for change notices; you can turn that off in Settings, and starting with Windows is off until you turn it on. The app makes no network requests: it has no accounts, telemetry or update checks, and it blocks Python sockets at startup. That check is inside the app, not a firewall. Opening a file hands it to your default app, which behaves as that app does. Network paths and mapped drives are refused, and cloud placeholders are skipped so that browsing never triggers a download.
 
 One thing changes this, and only if you turn it on. A tool connected over MCP can read the text of your files, and that tool may send it to an online service. It is off by default, and Settings says so next to the switch.
 
@@ -165,7 +165,7 @@ Search uses keywords. There is no semantic model, and nothing recognises what a 
 | --- | --- |
 | `desktop_app.py` | Main window, filters, preview, sources, settings |
 | `assistant.py` | Roo's window: moods, chosen pictures and taking drops |
-| `character.py` | Roo's rig: one painting per pose in `assets/roo`, with a living face on top |
+| `character.py` | Roo's rig: the paintings in `assets/roo`, with the sway, breathing, blinks and fades done in code |
 | `link_board.py` | The Links board: sets of linked files as cards |
 | `mcp_server.py` | MCP server for connected tools. Standard library only, and no Qt |
 | `visual_widgets.py` | Deck, hover behaviour and file covers |
