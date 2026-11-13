@@ -1,0 +1,125 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds the portable Windows copy on a clean
+# GitHub machine, starts it once, and publishes it with release-notes/<tag>.md.
+# The job's own token publishes the release; no key is stored anywhere.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      ZIP_NAME: Roostfile-windows-x64
+      # The python.org embeddable package of the build tested by hand.
+      EMBED_VERSION: 3.12.7
+      EMBED_MD5: 4c0a5a44d4ca1d0bc76fe08ea8b76adc
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Release notes for this tag
+        run: |
+          $notes = "release-notes/$env:TAG.md"
+          if (-not (Test-Path $notes)) { throw "Missing $notes. Write the notes before pushing the tag." }
+          $lines = @(Get-Content -Encoding utf8 $notes)
+          if ($lines.Count -lt 3 -or -not $lines[0].Trim() -or $lines[1].Trim()) {
+            throw "$notes must start with the title, then a blank line."
+          }
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Embeddable Python
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'embed.zip'
+          Invoke-WebRequest "https://www.python.org/ftp/python/$env:EMBED_VERSION/python-$env:EMBED_VERSION-embed-amd64.zip" -OutFile $zip
+          $md5 = (Get-FileHash -Algorithm MD5 $zip).Hash.ToLower()
+          if ($md5 -ne $env:EMBED_MD5) { throw "MD5 $md5 is not the one python.org lists." }
+          Expand-Archive $zip build/python
+          # Every file must match the runtime of the build tested by hand.
+          $base = (Resolve-Path build/python).Path
+          [string[]]$got = Get-ChildItem $base -File -Recurse | ForEach-Object {
+            (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower() + '  ' + [IO.Path]::GetRelativePath($base, $_.FullName).Replace('\', '/')
+          }
+          [string[]]$want = Get-Content ".github/python-$env:EMBED_VERSION-embed-amd64.sha256" | Where-Object { $_ }
+          [Array]::Sort($got, [StringComparer]::Ordinal)
+          [Array]::Sort($want, [StringComparer]::Ordinal)
+          $diff = Compare-Object $want $got
+          if ($diff) { $diff | Format-Table -AutoSize | Out-String -Width 300 | Write-Output; throw 'The embeddable Python differs from the tested one.' }
+          Write-Output "$($got.Count) runtime files match."
+
+      - name: Dependencies
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --target build/vendor -r requirements-ui.txt
+          if ($LASTEXITCODE) { throw "pip failed ($LASTEXITCODE)." }
+
+      - name: Build
+        run: |
+          python package_windows.py --python build/python --vendor build/vendor --out build/dist --name $env:ZIP_NAME
+          if ($LASTEXITCODE) { throw "package_windows.py failed ($LASTEXITCODE)." }
+
+      - name: Start the unzipped copy once
+        timeout-minutes: 5
+        run: |
+          # A folder name with a space and Chinese characters, as people use.
+          $root = Join-Path $env:RUNNER_TEMP ('Roost ' + [char]0x6816 + [char]0x6863)
+          Expand-Archive "build/dist/$env:ZIP_NAME.zip" $root
+          $app = Join-Path $root $env:ZIP_NAME
+          $python = Join-Path $app 'runtime\python.exe'
+          & $python -c "import sys; sys.path[:0] = [r'$app\.vendor']; import PySide6.QtWidgets, pypdf, pypdfium2; from winrt.windows.media.ocr import OcrEngine; print('imports ok')"
+          if ($LASTEXITCODE) { throw "Imports failed ($LASTEXITCODE)." }
+          $shot = Join-Path $env:RUNNER_TEMP 'demo.png'
+          & $python (Join-Path $app 'desktop_app.py') --demo --render $shot
+          if ($LASTEXITCODE) { throw "The demo stopped with code $LASTEXITCODE." }
+          if (-not (Test-Path $shot) -or (Get-Item $shot).Length -lt 20000) { throw 'The demo window did not render.' }
+          Write-Output "Demo window rendered: $((Get-Item $shot).Length) bytes."
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = $env:GITHUB_REPOSITORY
+          $zip = "build/dist/$env:ZIP_NAME.zip"
+          $size = (Get-Item $zip).Length
+          $sha = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          $lines = @(Get-Content -Encoding utf8 "release-notes/$env:TAG.md")
+          $title = $lines[0].Trim()
+          $body = (($lines | Select-Object -Skip 2) -join "`n").Trim().Replace('{{SHA256}}', $sha)
+          $notes = Join-Path $env:RUNNER_TEMP 'notes.md'
+          [IO.File]::WriteAllText($notes, $body + "`n", [Text.UTF8Encoding]::new($false))
+
+          # A draft left by a failed run is replaced; a published release is never touched.
+          $all = gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json
+          foreach ($r in @($all | Where-Object { $_.tag_name -eq $env:TAG })) {
+            if (-not $r.draft) { throw "$env:TAG is already published." }
+            gh api -X DELETE "repos/$repo/releases/$($r.id)"
+          }
+
+          gh release create $env:TAG $zip --draft --verify-tag --title $title --notes-file $notes
+          if ($LASTEXITCODE) { throw "Creating the draft failed ($LASTEXITCODE)." }
+          $all = gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json
+          $rel = $all | Where-Object { $_.tag_name -eq $env:TAG -and $_.draft } | Select-Object -First 1
+          $asset = $rel.assets | Where-Object { $_.name -eq "$env:ZIP_NAME.zip" }
+          if (-not $asset -or $asset.size -ne $size -or $asset.state -ne 'uploaded') { throw 'The uploaded zip is missing or incomplete.' }
+          if ($asset.digest -and $asset.digest -ne "sha256:$sha") { throw "GitHub reports $($asset.digest), expected sha256:$sha." }
+
+          gh api -X PATCH "repos/$repo/releases/$($rel.id)" -F draft=false -f make_latest=true --jq .html_url
+          if ($LASTEXITCODE) { throw "Publishing failed ($LASTEXITCODE)." }
+          "### $title`n`n- ``$env:ZIP_NAME.zip``: $([math]::Round($size / 1MB)) MB`n- SHA-256: ``$sha``" >> $env:GITHUB_STEP_SUMMARY
