@@ -10,7 +10,7 @@ A private file archive for your own computer. Add the folders you choose, then f
 - **Leaves your originals alone unless you say otherwise.** By default nothing is moved, renamed or deleted. You can choose to have dropped files moved into a library instead, and put any of them back. Nothing is uploaded.
 - **Finds what you half remember.** Search names, document text and words in photos and scans, in English and Chinese.
 
-> **Status: early prototype.** There is no installer yet. Tested on Windows 11 with Python 3.12. macOS support is written but has not been run on a Mac yet.
+> **Status: early prototype.** There is no installer yet; use the [one-line install](#one-line-install-windows-recommended). Tested on Windows 11 with Python 3.12. macOS support is written but has not been run on a Mac yet.
 
 ## What it does
 
@@ -81,6 +81,29 @@ Roostfile includes a server for the [Model Context Protocol](https://modelcontex
 It runs over stdin and stdout, opens no network connection, and reaches only what is already in your archive. Both switches are read on every request, so turning one off works at once, even mid-session. No tool moves, changes or deletes a file.
 
 ## Getting started
+
+### One-line install (Windows, recommended)
+
+No Python or GitHub know-how needed. In PowerShell, run:
+
+```powershell
+irm https://raw.githubusercontent.com/weichiwes/roostfile/main/install.ps1 | iex
+```
+
+It downloads the latest portable build from this repository's Releases, checks it against the SHA-256 GitHub publishes, installs it in `%LOCALAPPDATA%\Roostfile` (no admin rights needed), adds desktop and Start menu shortcuts, and opens Roostfile. Run it again to update; your library is kept. The script itself reads none of your files.
+
+### Let your AI assistant install it
+
+Send this to your AI assistant as is:
+
+```text
+Please install Roostfile on this Windows computer. It's an open-source local file search app: https://github.com/weichiwes/roostfile
+To install it, run this one line in PowerShell. It downloads the latest release from GitHub, installs it in my user folder and puts a shortcut on the desktop:
+irm https://raw.githubusercontent.com/weichiwes/roostfile/main/install.ps1 | iex
+If you can run commands on my computer, run it for me. If you can't, walk me through opening PowerShell and running it, step by step.
+```
+
+### From source
 
 You need Windows and Python 3.12 or later.
 
