@@ -10,7 +10,7 @@
 - **默认不动原文件**：默认不移动、不重命名、不删除。你也可以选择把拖入的文件直接移到资料库，之后随时能移回去。任何内容都不会上传。
 - **记得一点就能找到**：搜索文件名、文档正文，以及照片和扫描件里的文字，中英文都支持。
 
-> **当前状态：早期原型。** 还没有安装程序。已在 Windows 11 和 Python 3.12 上测试。macOS 版代码已写好，但还没有在 Mac 上运行过。
+> **当前状态：早期原型。** 还没有安装程序，可以用[一条命令安装](#一条命令安装windows推荐)。已在 Windows 11 和 Python 3.12 上测试。macOS 版代码已写好，但还没有在 Mac 上运行过。
 
 ## 能做什么
 
@@ -81,6 +81,29 @@
 它通过标准输入输出通信，不开任何网络连接，也只能接触已在资料库里的内容。两个开关每次请求都会重新读取，所以关掉后立刻生效，连接中的工具也一样。所有工具都不会移动、修改或删除文件。
 
 ## 开始使用
+
+### 一条命令安装（Windows，推荐）
+
+不用装 Python，也不用会 GitHub。在 PowerShell 里运行：
+
+```powershell
+irm https://raw.githubusercontent.com/weichiwes/roostfile/main/install.ps1 | iex
+```
+
+它会从本仓库的 Releases 下载最新的便携版，核对 GitHub 公布的 SHA-256，装到 `%LOCALAPPDATA%\Roostfile`（不需要管理员权限），在桌面和开始菜单放一个快捷方式，然后打开栖档。Windows 的显示语言、区域格式或系统区域设置是中文时，首次打开就是中文界面。再运行一次就是升级，资料库会保留。脚本本身不读取你的任何文件。
+
+### 让 AI 助手帮你装
+
+把下面这段话原样发给你的 AI 助手：
+
+```text
+帮我在这台 Windows 电脑上安装栖档（Roostfile），这是一个开源的本地文件搜索软件，项目地址 https://github.com/weichiwes/roostfile 。
+安装方法是在 PowerShell 里运行下面这一行，它会从 GitHub 下载最新版，装到当前用户的文件夹里，并在桌面放一个快捷方式：
+irm https://raw.githubusercontent.com/weichiwes/roostfile/main/install.ps1 | iex
+如果你能在我的电脑上执行命令，就直接帮我运行；如果不能，请一步一步教我怎么打开 PowerShell、粘贴并运行它。
+```
+
+### 从源码运行
 
 需要 Windows 和 Python 3.12 及以上。
 
