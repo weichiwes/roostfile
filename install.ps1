@@ -13,7 +13,9 @@ $repo = 'weichiwes/roostfile'
 $assetName = 'Roostfile-windows-x64.zip'
 $target = Join-Path $env:LOCALAPPDATA 'Roostfile'
 $work = Join-Path ([IO.Path]::GetTempPath()) ('roostfile-install-' + [guid]::NewGuid().ToString('N'))
-$zh = (Get-UICulture).Name -like 'zh*'
+# Chinese if the display language, the regional format or the language for non-Unicode programs is Chinese:
+# many people in China run English Windows with a Chinese region.
+$zh = [bool](@((Get-UICulture).Name, (Get-Culture).Name, $(try { (Get-WinSystemLocale).Name } catch { '' })) -like 'zh*')
 function Say($chinese, $english) { Write-Host ('[Roostfile] ' + $(if ($zh) { $chinese } else { $english })) }
 
 try {
@@ -62,7 +64,7 @@ try {
         Copy-Item -Destination $target -Recurse -Force
     Get-ChildItem -LiteralPath $target -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
 
-    # A first install on Chinese Windows opens in Chinese. Settings can switch it; an existing library keeps its choice.
+    # A first install on Chinese-language Windows (see $zh) opens in Chinese. Settings can switch it; an existing library keeps its choice.
     $state = Join-Path $target 'data\ui-state.json'
     if ($zh -and -not (Test-Path -LiteralPath (Join-Path $target 'data-location.txt')) -and -not (Test-Path -LiteralPath $state)) {
         New-Item -ItemType Directory -Path (Split-Path -Parent $state) -Force | Out-Null

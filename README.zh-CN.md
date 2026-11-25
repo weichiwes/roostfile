@@ -90,7 +90,7 @@
 irm https://raw.githubusercontent.com/weichiwes/roostfile/main/install.ps1 | iex
 ```
 
-它会从本仓库的 Releases 下载最新的便携版，核对 GitHub 公布的 SHA-256，装到 `%LOCALAPPDATA%\Roostfile`（不需要管理员权限），在桌面和开始菜单放一个快捷方式，然后打开栖档。中文 Windows 上首次打开就是中文界面。再运行一次就是升级，资料库会保留。脚本本身不读取你的任何文件。
+它会从本仓库的 Releases 下载最新的便携版，核对 GitHub 公布的 SHA-256，装到 `%LOCALAPPDATA%\Roostfile`（不需要管理员权限），在桌面和开始菜单放一个快捷方式，然后打开栖档。Windows 的显示语言、区域格式或系统区域设置是中文时，首次打开就是中文界面。再运行一次就是升级，资料库会保留。脚本本身不读取你的任何文件。
 
 ### 让 AI 助手帮你装
 
