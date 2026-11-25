@@ -71,8 +71,11 @@ jobs:
           foreach ($folder in [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop')) {
             if (-not (Test-Path $folder)) { continue }
             $link = Join-Path $folder $linkName
-            if (-not (Test-Path $link)) { throw "No shortcut $link." }
-            $to = (New-Object -ComObject WScript.Shell).CreateShortcut($link).TargetPath
+            if (-not (Test-Path -LiteralPath $link)) { throw "No shortcut $link." }
+            # WScript.Shell can't open a Chinese file name on English Windows either, so read a plain-named copy.
+            $copy = Join-Path $env:RUNNER_TEMP 'check.lnk'
+            Copy-Item -LiteralPath $link -Destination $copy -Force
+            $to = (New-Object -ComObject WScript.Shell).CreateShortcut($copy).TargetPath
             if ($to -ne (Join-Path $target 'start.cmd')) { throw "$link points to $to." }
           }
           WaitForApp
