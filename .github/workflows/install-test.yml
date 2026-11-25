@@ -48,6 +48,7 @@ jobs:
           function Install {
             $out = & { Invoke-RestMethod $env:SCRIPT_URL | Invoke-Expression } 6>&1 | Out-String
             Write-Host $out
+            $script:lastOutput = $out
             return $out
           }
           function App { Get-Process pythonw, python -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($target, [StringComparison]::OrdinalIgnoreCase) } }
@@ -56,6 +57,10 @@ jobs:
             throw 'Roostfile did not start.'
           }
 
+          # A failure is reported as annotations too, which the API serves without the full log.
+          function Escape([string]$text) { $text.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A') }
+          $script:lastOutput = ''
+          try {
           Write-Output '== First install'
           $out = Install
           if (-not $out.Contains($verified)) { throw "No '$verified' in the output (wrong text encoding or no checksum)." }
@@ -98,4 +103,10 @@ jobs:
           WaitForApp
           App | Stop-Process -Force
           Write-Output 'Update ok.'
+          }
+          catch {
+            Write-Host "::error title=Installer test ($env:CULTURE)::$(Escape $_.Exception.Message)"
+            if ($script:lastOutput) { Write-Host "::warning title=Installer output ($env:CULTURE)::$(Escape $script:lastOutput.Trim())" }
+            exit 1
+          }
           "### Installer ($env:CULTURE)`n`nFirst install, refusal while running and update all passed." >> $env:GITHUB_STEP_SUMMARY
