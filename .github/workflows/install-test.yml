@@ -93,6 +93,7 @@ jobs:
 
           Write-Output '== Update'
           $marker = Join-Path $target 'data\kept-by-update.txt'
+          New-Item -ItemType Directory -Path (Split-Path -Parent $marker) -Force | Out-Null
           Set-Content -Path $marker -Value 'library'
           Set-Content -Path (Join-Path $target 'leftover-from-old-version.txt') -Value 'old'
           $out = Install

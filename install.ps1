@@ -78,11 +78,21 @@
         $name = $(if ($zh) { '栖档 Roostfile.lnk' } else { 'Roostfile.lnk' })
         foreach ($folder in @([Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop'))) {
             if (-not $folder -or -not (Test-Path -LiteralPath $folder)) { continue }
-            $link = $shell.CreateShortcut((Join-Path $folder $name))
-            $link.TargetPath = Join-Path $target 'start.cmd'
-            $link.WorkingDirectory = $target
-            $link.WindowStyle = 7  # minimized: the launcher's console closes as soon as the window opens
-            $link.Save()
+            # WScript.Shell saves through the ANSI code page, which turns 栖档 into ?? on English Windows, so the
+            # shortcut is saved under a plain name and given its real name by a rename. A shortcut that can't be
+            # made is reported; the app is installed either way.
+            try {
+                $temp = Join-Path $folder 'Roostfile-new.lnk'
+                $link = $shell.CreateShortcut($temp)
+                $link.TargetPath = Join-Path $target 'start.cmd'
+                $link.WorkingDirectory = $target
+                $link.WindowStyle = 7  # minimized: the launcher's console closes as soon as the window opens
+                $link.Save()
+                Move-Item -LiteralPath $temp -Destination (Join-Path $folder $name) -Force
+            }
+            catch {
+                Say "没能在 $folder 里创建快捷方式：$($_.Exception.Message)" "Could not make a shortcut in ${folder}: $($_.Exception.Message)"
+            }
         }
 
         Say "已装好：$target" "Installed in $target"
