@@ -1,0 +1,101 @@
+name: Installer
+
+# Runs install.ps1 the way people do — irm … | iex in Windows PowerShell 5.1 — on a clean GitHub Windows
+# machine, once with an English and once with a Chinese regional format: a first install, the refusal while
+# Roostfile runs, and an update that keeps the library. It installs the latest published release.
+on:
+  push:
+    paths: ['install.ps1', '.github/workflows/install-test.yml']
+  pull_request:
+    paths: ['install.ps1', '.github/workflows/install-test.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        culture: [en-US, zh-CN]
+    defaults:
+      run:
+        shell: powershell
+    env:
+      # The script exactly as this commit has it, fetched the way the README tells people to.
+      SCRIPT_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.event.pull_request.head.sha || github.sha }}/install.ps1
+      CULTURE: ${{ matrix.culture }}
+    steps:
+      - name: Regional format
+        # Read by the processes of the later steps, as a person's region setting would be.
+        run: Set-Culture $env:CULTURE
+
+      - name: First install, then the refusal while it runs, then an update
+        run: |
+          # Chinese text is built from code points so this file stays ASCII.
+          function Words([int[]]$codes) { -join [char[]]$codes }
+          $zh = $env:CULTURE -like 'zh*'
+          $verified = $(if ($zh) { Words 0x6821,0x9A8C,0x901A,0x8FC7 } else { 'Checksum verified' })        # 校验通过
+          $runningWord = $(if ($zh) { Words 0x6B63,0x5728,0x8FD0,0x884C } else { 'is running' })             # 正在运行
+          $installedWord = $(if ($zh) { Words 0x5DF2,0x88C5,0x597D } else { 'Installed in' })                # 已装好
+          $linkName = $(if ($zh) { (Words 0x6816,0x6863) + ' Roostfile.lnk' } else { 'Roostfile.lnk' })    # 栖档
+
+          $target = Join-Path $env:LOCALAPPDATA 'Roostfile'
+          if (Test-Path $target) { throw "$target exists before the test." }
+          function Install {
+            $out = & { Invoke-RestMethod $env:SCRIPT_URL | Invoke-Expression } 6>&1 | Out-String
+            Write-Host $out
+            return $out
+          }
+          function App { Get-Process pythonw, python -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($target, [StringComparison]::OrdinalIgnoreCase) } }
+          function WaitForApp {
+            foreach ($i in 1..60) { if (App) { return }; Start-Sleep 1 }
+            throw 'Roostfile did not start.'
+          }
+
+          Write-Output '== First install'
+          $out = Install
+          if (-not $out.Contains($verified)) { throw "No '$verified' in the output (wrong text encoding or no checksum)." }
+          if (-not $out.Contains($installedWord)) { throw "No '$installedWord' in the output." }
+          foreach ($file in 'start.cmd', 'launch.ps1', 'desktop_app.py', 'runtime\python.exe', 'runtime\pythonw.exe') {
+            if (-not (Test-Path (Join-Path $target $file))) { throw "$file is missing." }
+          }
+          foreach ($folder in [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop')) {
+            if (-not (Test-Path $folder)) { continue }
+            $link = Join-Path $folder $linkName
+            if (-not (Test-Path $link)) { throw "No shortcut $link." }
+            $to = (New-Object -ComObject WScript.Shell).CreateShortcut($link).TargetPath
+            if ($to -ne (Join-Path $target 'start.cmd')) { throw "$link points to $to." }
+          }
+          WaitForApp
+          $state = Join-Path $target 'data\ui-state.json'
+          $language = $(if (Test-Path $state) { (Get-Content $state -Raw -Encoding UTF8 | ConvertFrom-Json).language } else { $null })
+          if ($zh -and $language -ne 'zh') { throw "Expected a Chinese interface, ui-state.json says '$language'." }
+          if (-not $zh -and $language -eq 'zh') { throw 'An English setup got the Chinese interface.' }
+          Write-Output "First install ok (interface: $(if ($language) { $language } else { 'default' }))."
+
+          Write-Output '== While it runs'
+          $stamp = (Get-Item (Join-Path $target 'core.py')).LastWriteTimeUtc
+          $out = Install
+          if (-not $out.Contains($runningWord)) { throw "No '$runningWord' in the output." }
+          if ((Get-Item (Join-Path $target 'core.py')).LastWriteTimeUtc -ne $stamp) { throw 'Files changed while Roostfile was running.' }
+          App | Stop-Process -Force
+          Start-Sleep 2
+          Write-Output 'Refusal ok.'
+
+          Write-Output '== Update'
+          $marker = Join-Path $target 'data\kept-by-update.txt'
+          Set-Content -Path $marker -Value 'library'
+          Set-Content -Path (Join-Path $target 'leftover-from-old-version.txt') -Value 'old'
+          $out = Install
+          if (-not $out.Contains($installedWord)) { throw "No '$installedWord' in the output." }
+          if (-not (Test-Path $marker)) { throw 'The update removed the library.' }
+          if (Test-Path (Join-Path $target 'leftover-from-old-version.txt')) { throw 'The update kept old app files.' }
+          if ($zh -and (Get-Content $state -Raw -Encoding UTF8 | ConvertFrom-Json).language -ne 'zh') { throw 'The update lost the interface language.' }
+          WaitForApp
+          App | Stop-Process -Force
+          Write-Output 'Update ok.'
+          "### Installer ($env:CULTURE)`n`nFirst install, refusal while running and update all passed." >> $env:GITHUB_STEP_SUMMARY
